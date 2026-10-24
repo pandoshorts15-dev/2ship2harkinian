@@ -2,6 +2,7 @@
 #include "2s2h/GameInteractor/GameInteractor.h"
 #include "2s2h/ShipInit.hpp"
 #include "CameraUtils.h"
+#include "2s2h/Enhancements/PhotoMode/PhotoMode.h"
 
 extern "C" {
 #include "macros.h"
@@ -117,6 +118,11 @@ void Camera_DebugCam(Camera* camera) {
         Vec3f unit = OLib_Vec3fDistNormalize(eye, at);
         Math_Vec3f_Sum(eye, &unit, at);
         sDebugCamRefreshParams = false;
+    }
+
+    // 2S2H [Photo Mode] Mientras se mueve a Link con el mando, la camara libre no responde a los controles.
+    if (PhotoMode_IsMovingLink()) {
+        return;
     }
 
     s32 controllerPort = CVarGetInteger("gEnhancements.Camera.DebugCam.Port", CAMERA_DEBUG_DEFAULT_PORT) - 1;

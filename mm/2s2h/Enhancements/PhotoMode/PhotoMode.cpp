@@ -1,7 +1,8 @@
 // Modo Foto para 2 Ship 2 Harkinian.
 // Congela el mundo, oculta el HUD y a Tatl, activa la camara libre y permite posar a Link:
 // cualquier frame de cualquiera de sus animaciones, mas ajustes por hueso, expresion y giro.
-// Tambien puede convertir a Link en un objeto (mascaras, armas, objetos clave) para tomas de detalle.
+// Tambien puede convertir a Link en un objeto (mascaras, armas, objetos clave) para tomas de detalle,
+// moverlo libremente por el escenario y teletransportarse a cualquier escena.
 
 #include "PhotoMode.h"
 #include "PhotoModeAnims.h"
@@ -27,6 +28,8 @@ extern "C" {
 #include "objects/object_stk/object_stk.h"
 AnimationHeaderCommon* ResourceMgr_LoadAnimByName(const char* path);
 }
+
+#include "PhotoModeScenes.h"
 
 #define DEBUG_CAM_CVAR "gEnhancements.Camera.DebugCam.Enable"
 #define DEBUG_CAM_SPEED_CVAR "gEnhancements.Camera.DebugCam.CameraSpeed"
@@ -141,6 +144,18 @@ float sObjectHeight = 30.0f;
 float sObjectRot[3] = { 0.0f, 0.0f, 0.0f };
 bool sObjectSpin = false;
 float sObjectSpinAngle = 0.0f;
+
+// Mover a Link
+bool sMoveLink = false;
+float sMoveSpeed = 0.5f;
+Vec3f sSavedPos;
+s16 sSavedYaw = 0;
+bool sHasSavedPos = false;
+
+// Teletransporte
+char sSceneFilter[64] = "";
+int sRegion = 0; // 0 = todas, 1.. = sPhotoModeRegions[i - 1]
+int sSceneIndex = -1;
 
 const char* sLimbNames[PLAYER_LIMB_MAX] = {
     "(posicion raiz)", "Raiz",          "Cintura",           "Raiz inferior",    "Muslo derecho",
@@ -281,6 +296,97 @@ void SetDebugCam(bool on) {
     ShipInit::Init(DEBUG_CAM_CVAR);
 }
 
+// Mueve a Link con el mando mientras "Mover a Link" esta activo. Link esta congelado, asi que solo se cambia
+// su posicion: no hay colisiones ni gravedad, puede quedar flotando o dentro de una pared a proposito.
+void MoveLinkUpdate() {
+    Player* player = GetPlayer();
+    if (player == nullptr || gPlayState->pauseCtx.state != PAUSE_STATE_OFF) {
+        return;
+    }
+    Input* input = &gPlayState->state.input[0];
+    float speed = sMoveSpeed * 20.0f;
+    if (CHECK_BTN_ANY(input->cur.button, BTN_A | BTN_B | BTN_L)) {
+        speed *= 3.0f;
+    }
+
+    // Direccion segun hacia donde mira la camara, para que "arriba" en el stick sea "alejarse de la camara".
+    Camera* cam = GET_ACTIVE_CAM(gPlayState);
+    s16 camYaw = (cam != nullptr) ? Math_Vec3f_Yaw(&cam->eye, &cam->at) : player->actor.shape.rot.y;
+    float fx = Math_SinS(camYaw);
+    float fz = Math_CosS(camYaw);
+    float rx = -fz; // derecha = adelante girado -90 grados
+    float rz = fx;
+
+    float sx = input->cur.stick_x / 60.0f;
+    float sy = input->cur.stick_y / 60.0f;
+    if (fabsf(sx) < 0.1f) {
+        sx = 0.0f;
+    }
+    if (fabsf(sy) < 0.1f) {
+        sy = 0.0f;
+    }
+
+    Vec3f* pos = &player->actor.world.pos;
+    pos->x += (fx * sy + rx * sx) * speed;
+    pos->z += (fz * sy + rz * sx) * speed;
+    pos->y += (CHECK_BTN_ANY(input->cur.button, BTN_Z) - CHECK_BTN_ANY(input->cur.button, BTN_R)) * speed * 0.5f;
+
+    // Girar a Link con C izquierda / C derecha.
+    s16 turn = (s16)((CHECK_BTN_ANY(input->cur.button, BTN_CLEFT) - CHECK_BTN_ANY(input->cur.button, BTN_CRIGHT)) *
+                     0x200 * (CHECK_BTN_ANY(input->cur.button, BTN_A | BTN_B | BTN_L) ? 3 : 1));
+    if (turn != 0) {
+        if (sPoseActive && sHasBaseYaw) {
+            sBaseYaw += turn;
+        } else {
+            player->actor.shape.rot.y += turn;
+            player->actor.world.rot.y = player->actor.shape.rot.y;
+        }
+    }
+
+    player->actor.prevPos = *pos;
+    player->actor.home.pos = *pos;
+}
+
+void StartMoveLink() {
+    Player* player = GetPlayer();
+    if (player == nullptr) {
+        return;
+    }
+    if (!sHasSavedPos) {
+        sSavedPos = player->actor.world.pos;
+        sSavedYaw = player->actor.shape.rot.y;
+        sHasSavedPos = true;
+    }
+}
+
+void RestoreLinkPosition() {
+    Player* player = GetPlayer();
+    if (player == nullptr || !sHasSavedPos) {
+        return;
+    }
+    player->actor.world.pos = sSavedPos;
+    player->actor.prevPos = sSavedPos;
+    player->actor.shape.rot.y = sSavedYaw;
+    player->actor.world.rot.y = sSavedYaw;
+    if (sPoseActive) {
+        sBaseYaw = sSavedYaw;
+    }
+}
+
+void TeleportTo(s32 entrance) {
+    if (gPlayState == nullptr) {
+        return;
+    }
+    sMoveLink = false;
+    sHasSavedPos = false;
+    sPoseActive = false;
+    sHasBaseYaw = false;
+    gPlayState->nextEntrance = entrance;
+    gPlayState->transitionTrigger = TRANS_TRIGGER_START;
+    gPlayState->transitionType = TRANS_TYPE_FADE_BLACK_FAST;
+    gSaveContext.nextTransitionType = TRANS_TYPE_FADE_BLACK_FAST;
+}
+
 void RegisterPhotoMode() {
     // Congelar actores. Con una pose o un objeto activo, Link siempre se congela.
     COND_HOOK(ShouldActorUpdate, true, [](Actor* actor, bool* should) {
@@ -289,7 +395,7 @@ void RegisterPhotoMode() {
         }
         if (sFreezeWorld) {
             *should = false;
-        } else if ((sPoseActive || sObjectMode) && actor->id == ACTOR_PLAYER) {
+        } else if ((sPoseActive || sObjectMode || sMoveLink) && actor->id == ACTOR_PLAYER) {
             *should = false;
         }
     });
@@ -326,12 +432,17 @@ void RegisterPhotoMode() {
         } else {
             sTimeCaptured = false;
         }
+        if (sEnabled && sMoveLink && gPlayState != nullptr) {
+            MoveLinkUpdate();
+        }
     });
 
     // Al cambiar de escena se apaga la pose para no aplicarla a un Link recien cargado.
     COND_HOOK(OnSceneInit, true, [](s8 sceneId, s8 spawnNum) {
         sPoseActive = false;
         sHasBaseYaw = false;
+        sMoveLink = false;
+        sHasSavedPos = false;
     });
 }
 
@@ -506,19 +617,139 @@ void DrawObjectSection() {
     }
 }
 
+void DrawMoveSection() {
+    if (!ImGui::CollapsingHeader("Mover a Link", ImGuiTreeNodeFlags_DefaultOpen)) {
+        return;
+    }
+    if (ImGui::Checkbox("Mover a Link con el mando", &sMoveLink)) {
+        if (sMoveLink) {
+            StartMoveLink();
+        }
+    }
+    if (sMoveLink) {
+        ImGui::SliderFloat("Velocidad de Link", &sMoveSpeed, 0.05f, 3.0f, "%.2f");
+        ImGui::TextWrapped("Stick izquierdo: mover (segun la camara). Z / R: subir / bajar. "
+                           "C izquierda / C derecha: girar. A, B o L: mas rapido. "
+                           "Mientras esta activo la camara libre se queda quieta. "
+                           "No hay colisiones: Link puede flotar o atravesar paredes.");
+    }
+    ImGui::BeginDisabled(!sHasSavedPos);
+    if (ImGui::Button("Volver a la posicion original")) {
+        RestoreLinkPosition();
+    }
+    ImGui::EndDisabled();
+}
+
+bool SceneMatchesFilter(const PhotoModeScene& scene) {
+    if (sRegion > 0 && strcmp(scene.region, sPhotoModeRegions[sRegion - 1]) != 0) {
+        return false;
+    }
+    if (sSceneFilter[0] == '\0') {
+        return true;
+    }
+    std::string needle = ToLower(sSceneFilter);
+    return ToLower(scene.label).find(needle) != std::string::npos ||
+           ToLower(scene.alias).find(needle) != std::string::npos;
+}
+
+void DrawTeleportSection() {
+    if (!ImGui::CollapsingHeader("Teletransporte")) {
+        return;
+    }
+    const char* preview = sRegion == 0 ? "Todas las zonas" : sPhotoModeRegions[sRegion - 1];
+    if (ImGui::BeginCombo("Zona", preview)) {
+        if (ImGui::Selectable("Todas las zonas", sRegion == 0)) {
+            sRegion = 0;
+        }
+        for (int i = 0; i < (int)PHOTO_MODE_REGION_COUNT; i++) {
+            if (ImGui::Selectable(sPhotoModeRegions[i], sRegion == i + 1)) {
+                sRegion = i + 1;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::InputText("Buscar escenario", sSceneFilter, sizeof(sSceneFilter));
+
+    if (ImGui::BeginListBox("##escenarios", ImVec2(-FLT_MIN, 8 * ImGui::GetTextLineHeightWithSpacing()))) {
+        for (int i = 0; i < (int)PHOTO_MODE_SCENE_COUNT; i++) {
+            const PhotoModeScene& scene = sPhotoModeScenes[i];
+            if (!SceneMatchesFilter(scene)) {
+                continue;
+            }
+            ImGui::PushID(i);
+            if (ImGui::Selectable(scene.label, sSceneIndex == i, ImGuiSelectableFlags_AllowDoubleClick)) {
+                sSceneIndex = i;
+                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                    TeleportTo(scene.entrance);
+                }
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndListBox();
+    }
+
+    ImGui::BeginDisabled(sSceneIndex < 0);
+    if (ImGui::Button("Teletransportarme")) {
+        TeleportTo(sPhotoModeScenes[sSceneIndex].entrance);
+    }
+    ImGui::EndDisabled();
+    ImGui::TextWrapped("Doble clic en un escenario tambien te lleva. Apareces en la entrada principal; "
+                       "despues usa \"Mover a Link\" para colocarlo donde quieras. "
+                       "Algunas escenas pueden lanzar su cinematica o verse vacias segun el dia y tu progreso. "
+                       "Por seguridad, no guardes la partida despues de teletransportarte.");
+}
+
 } // namespace
 
 extern "C" int PhotoMode_ShouldHideHud(void) {
     return (sEnabled && sHideHud) ? 1 : 0;
 }
 
+extern "C" int PhotoMode_IsMovingLink(void) {
+    return (sEnabled && sMoveLink) ? 1 : 0;
+}
+
 void PhotoModeWindow::InitElement() {
 }
 
-// Se reemplaza Draw solo para aplicar la transparencia del fondo antes de abrir la ventana.
+// Draw propio: el de GuiWindow no deja cambiar los colores ni los flags de la ventana.
+// - Los colores de fondo se fuerzan con PushStyleColor (SetNextWindowBgAlpha no tenia efecto con el tema de 2Ship).
+// - NoDocking: si la ventana esta acoplada a un lado, el juego se encoge y detras solo hay negro, asi que la
+//   transparencia no se notaba. Con este flag se desacopla y flota encima del juego.
 void PhotoModeWindow::Draw() {
-    ImGui::SetNextWindowBgAlpha(sWindowAlpha);
-    GuiWindow::Draw();
+    if (!IsVisible()) {
+        return;
+    }
+    ImGui::SetNextWindowSize(ImVec2(420, 700), ImGuiCond_FirstUseEver);
+
+    const float a = std::clamp(sWindowAlpha, 0.0f, 1.0f);
+    ImVec4 windowBg = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
+    ImVec4 childBg = ImGui::GetStyleColorVec4(ImGuiCol_ChildBg);
+    ImVec4 frameBg = ImGui::GetStyleColorVec4(ImGuiCol_FrameBg);
+    ImVec4 titleBg = ImGui::GetStyleColorVec4(ImGuiCol_TitleBg);
+    ImVec4 titleBgActive = ImGui::GetStyleColorVec4(ImGuiCol_TitleBgActive);
+    windowBg.w = a;
+    childBg.w *= a;
+    frameBg.w *= 0.35f + 0.65f * a; // los controles siguen visibles aunque el fondo sea invisible
+    titleBg.w *= 0.5f + 0.5f * a;
+    titleBgActive.w *= 0.5f + 0.5f * a;
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, windowBg);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, childBg);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, frameBg);
+    ImGui::PushStyleColor(ImGuiCol_TitleBg, titleBg);
+    ImGui::PushStyleColor(ImGuiCol_TitleBgActive, titleBgActive);
+
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoDocking;
+    if (a <= 0.001f) {
+        flags |= ImGuiWindowFlags_NoBackground;
+    }
+    if (ImGui::Begin(GetName().c_str(), &mIsVisible, flags)) {
+        DrawElement();
+    }
+    ImGui::End();
+    ImGui::PopStyleColor(5);
+
+    SyncVisibilityConsoleVariable();
 }
 
 void PhotoModeWindow::DrawElement() {
@@ -532,9 +763,16 @@ void PhotoModeWindow::DrawElement() {
             sPoseActive = false;
             sHasBaseYaw = false;
             sObjectMode = false;
+            sMoveLink = false;
+            sHasSavedPos = false;
         }
     }
     ImGui::SliderFloat("Opacidad del menu", &sWindowAlpha, 0.0f, 1.0f, "%.2f");
+    if (ImGui::GetWindowViewport() != ImGui::GetMainViewport()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
+                           "La ventana esta fuera del juego: arrastrala encima del juego para que se vea "
+                           "la transparencia.");
+    }
     ImGui::TextWrapped("Consejo: con F1 ocultas el menu y puedes cerrar esta ventana; el Modo Foto sigue activo.");
 
     if (!sEnabled) {
@@ -542,6 +780,8 @@ void PhotoModeWindow::DrawElement() {
     }
 
     DrawCameraSection();
+    DrawMoveSection();
     DrawPoseSection();
     DrawObjectSection();
+    DrawTeleportSection();
 }
