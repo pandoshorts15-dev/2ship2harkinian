@@ -2004,6 +2004,14 @@ void BenMenu::AddEnhancements() {
                      .Max(5)
                      .DefaultValue(5));
 
+    // Modo Foto
+    path = { "Enhancements", "Modo Foto", SECTION_COLUMN_1 };
+    AddSidebarEntry("Enhancements", "Modo Foto", 1);
+    AddWidget(path, "Abrir Modo Foto", WIDGET_WINDOW_BUTTON)
+        .CVar("gWindows.PhotoMode")
+        .Options(ButtonOptions().Tooltip("Congela el mundo, oculta el HUD y permite posar a Link para miniaturas."))
+        .WindowName("Modo Foto");
+
     // HUD Editor
     path = { "Enhancements", "HUD Editor", SECTION_COLUMN_1 };
     AddSidebarEntry("Enhancements", "HUD Editor", 1);

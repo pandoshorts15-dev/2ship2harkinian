@@ -45,6 +45,7 @@ u8 sMotionBlurStatus;
 #include "2s2h/Enhancements/FrameInterpolation/FrameInterpolation.h"
 #include "2s2h/Enhancements/Graphics/Graphics.h"
 #include "2s2h/DeveloperTools/CollisionViewer.h"
+#include "2s2h/Enhancements/PhotoMode/PhotoMode.h"
 #include "2s2h/framebuffer_effects.h"
 #include <string.h>
 
@@ -1145,7 +1146,8 @@ void Play_PostWorldDraw(PlayState* this) {
         KaleidoScopeCall_Draw(this);
     }
 
-    if (gSaveContext.gameMode == GAMEMODE_NORMAL) {
+    // 2S2H [Photo Mode] Ocultar el HUD cuando el Modo Foto lo pide
+    if (gSaveContext.gameMode == GAMEMODE_NORMAL && !PhotoMode_ShouldHideHud()) {
         Interface_Draw(this);
     }
 

@@ -34,6 +34,7 @@
 #include "DeveloperTools/ActorViewer.h"
 #include "DeveloperTools/CollisionViewer.h"
 #include "DeveloperTools/EventLog.h"
+#include "Enhancements/PhotoMode/PhotoMode.h"
 #include "DeveloperTools/DLViewer.h"
 #include "DeveloperTools/MessageViewer.h"
 
@@ -54,6 +55,7 @@ std::shared_ptr<CosmeticEditorWindow> mCosmeticEditorWindow;
 std::shared_ptr<ActorViewerWindow> mActorViewerWindow;
 std::shared_ptr<CollisionViewerWindow> mCollisionViewerWindow;
 std::shared_ptr<EventLogWindow> mEventLogWindow;
+std::shared_ptr<PhotoModeWindow> mPhotoModeWindow;
 std::shared_ptr<DLViewerWindow> mDLViewerWindow;
 std::shared_ptr<MessageViewerWindow> mMessageViewerWindow;
 std::shared_ptr<AudioEditor> mAudioEditorWindow;
@@ -136,6 +138,9 @@ void SetupGuiElements() {
     mEventLogWindow = std::make_shared<EventLogWindow>("gWindows.EventLog", "Event Log", ImVec2(520, 600));
     gui->AddGuiWindow(mEventLogWindow);
 
+    mPhotoModeWindow = std::make_shared<PhotoModeWindow>("gWindows.PhotoMode", "Modo Foto", ImVec2(420, 700));
+    gui->AddGuiWindow(mPhotoModeWindow);
+
     mDLViewerWindow = std::make_shared<DLViewerWindow>("gWindows.DLViewer", "DL Viewer", ImVec2(520, 600));
     gui->AddGuiWindow(mDLViewerWindow);
     mMessageViewerWindow =
@@ -197,6 +202,7 @@ void Destroy() {
     mInputEditorWindow = nullptr;
     mCollisionViewerWindow = nullptr;
     mEventLogWindow = nullptr;
+    mPhotoModeWindow = nullptr;
     mNotificationWindow = nullptr;
     mRandoCheckTrackerWindow = nullptr;
     mRandoCheckTrackerSettingsWindow = nullptr;
