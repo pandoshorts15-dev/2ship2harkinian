@@ -291,6 +291,14 @@ void PhotoModeWindow::DrawElement() {
                 if (ImGui::Selectable(sPhotoModeAnims[i].name, selected)) {
                     sAnimIndex = i;
                     LoadAnimFrame(sAnimIndex, 0);
+                    // Elegir una animacion activa la pose automaticamente
+                    if (!sPoseActive) {
+                        sPoseActive = true;
+                        if (player != nullptr) {
+                            sBaseYaw = player->actor.shape.rot.y;
+                            sHasBaseYaw = true;
+                        }
+                    }
                 }
                 if (selected) {
                     ImGui::SetItemDefaultFocus();
