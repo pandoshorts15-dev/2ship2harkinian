@@ -1,6 +1,7 @@
 // Modo Foto para 2 Ship 2 Harkinian.
 // Congela el mundo, oculta el HUD y a Tatl, activa la camara libre y permite posar a Link:
 // cualquier frame de cualquiera de sus animaciones, mas ajustes por hueso, expresion y giro.
+// Tambien puede convertir a Link en un objeto (mascaras, armas, objetos clave) para tomas de detalle.
 
 #include "PhotoMode.h"
 #include "PhotoModeAnims.h"
@@ -21,13 +22,90 @@ extern "C" {
 #include "z64player.h"
 #include "functions.h"
 #include "variables.h"
+#include "sys_matrix.h"
+#include "gfx.h"
+#include "objects/object_stk/object_stk.h"
 AnimationHeaderCommon* ResourceMgr_LoadAnimByName(const char* path);
 }
 
 #define DEBUG_CAM_CVAR "gEnhancements.Camera.DebugCam.Enable"
+#define DEBUG_CAM_SPEED_CVAR "gEnhancements.Camera.DebugCam.CameraSpeed"
+#define DEBUG_CAM_VSPEED_CVAR "gEnhancements.Camera.DebugCam.VerticalSpeed"
 #define PHOTO_FRAME_SIZE (sizeof(Vec3s) * PLAYER_LIMB_MAX + sizeof(s16))
 
 namespace {
+
+// ---- Objetos en los que se puede convertir a Link ----
+#define PHOTO_OBJ_MAJORA -2
+
+struct PhotoModeObject {
+    const char* name;
+    s16 gid;         // GID_* o PHOTO_OBJ_MAJORA
+    float baseScale; // Escala que lo deja de un tamano parecido al de Link
+};
+
+const PhotoModeObject sObjects[] = {
+    // Mascaras
+    { "Mascara de Majora", PHOTO_OBJ_MAJORA, 0.03f },
+    { "Mascara Deku", GID_MASK_DEKU, 0.6f },
+    { "Mascara Goron", GID_MASK_GORON, 0.6f },
+    { "Mascara Zora", GID_MASK_ZORA, 0.6f },
+    { "Mascara de la Fiera Deidad", GID_MASK_FIERCE_DEITY, 0.6f },
+    { "Mascara del Gigante", GID_MASK_GIANT, 0.6f },
+    { "Mascara de la Verdad", GID_MASK_TRUTH, 0.6f },
+    { "Mascara de Kafei", GID_MASK_KAFEIS_MASK, 0.6f },
+    { "Mascara del Sol", GID_MASK_SUN, 0.6f },
+    { "Mascara de los Amantes", GID_MASK_COUPLE, 0.6f },
+    { "Mascara de Toda la Noche", GID_MASK_ALL_NIGHT, 0.6f },
+    { "Capucha de Conejo", GID_MASK_BUNNY, 0.6f },
+    { "Mascara de Keaton", GID_MASK_KEATON, 0.6f },
+    { "Mascara de Garo", GID_MASK_GARO, 0.6f },
+    { "Mascara de Romani", GID_MASK_ROMANI, 0.6f },
+    { "Mascara del Lider de la Compania", GID_MASK_CIRCUS_LEADER, 0.6f },
+    { "Gorra del Cartero", GID_MASK_POSTMAN, 0.6f },
+    { "Mascara de la Gran Hada", GID_MASK_GREAT_FAIRY, 0.6f },
+    { "Mascara de Gibdo", GID_MASK_GIBDO, 0.6f },
+    { "Mascara de Don Gero", GID_MASK_DON_GERO, 0.6f },
+    { "Mascara de Kamaro", GID_MASK_KAMARO, 0.6f },
+    { "Sombrero del Capitan", GID_MASK_CAPTAIN, 0.6f },
+    { "Mascara de Piedra", GID_MASK_STONE, 0.6f },
+    { "Mascara de Bremen", GID_MASK_BREMEN, 0.6f },
+    { "Mascara Explosiva", GID_MASK_BLAST, 0.6f },
+    { "Mascara de los Aromas", GID_MASK_SCENTS, 0.6f },
+    // Restos de los jefes
+    { "Restos de Odolwa", GID_REMAINS_ODOLWA, 0.6f },
+    { "Restos de Goht", GID_REMAINS_GOHT, 0.6f },
+    { "Restos de Gyorg", GID_REMAINS_GYORG, 0.6f },
+    { "Restos de Twinmold", GID_REMAINS_TWINMOLD, 0.6f },
+    // Objetos y equipo
+    { "Ocarina del Tiempo", GID_OCARINA, 0.6f },
+    { "Espada Kokiri", GID_SWORD_KOKIRI, 0.6f },
+    { "Espada Afilada", GID_SWORD_RAZOR, 0.6f },
+    { "Espada Dorada", GID_SWORD_GILDED, 0.6f },
+    { "Espada de la Gran Hada", GID_SWORD_GREAT_FAIRY, 0.6f },
+    { "Escudo del Heroe", GID_SHIELD_HERO, 0.6f },
+    { "Escudo Espejo", GID_SHIELD_MIRROR, 0.6f },
+    { "Arco del Heroe", GID_BOW, 0.6f },
+    { "Gancho", GID_HOOKSHOT, 0.6f },
+    { "Lente de la Verdad", GID_LENS, 0.6f },
+    { "Pictografo", GID_PICTOGRAPH_BOX, 0.6f },
+    { "Bomba", GID_BOMB, 0.6f },
+    { "Bombchu", GID_BOMBCHU, 0.6f },
+    { "Barril de polvora", GID_POWDER_KEG, 0.6f },
+    { "Botella", GID_BOTTLE, 0.6f },
+    { "Lagrima de Luna", GID_MOONS_TEAR, 0.6f },
+    { "Cuaderno de los Bombers", GID_BOMBERS_NOTEBOOK, 0.6f },
+    { "Colgante de los Recuerdos", GID_PENDANT_OF_MEMORIES, 0.6f },
+    { "Huevo Zora", GID_ZORA_EGG, 0.6f },
+    { "Hada", GID_FAIRY, 0.6f },
+    { "Pieza de corazon", GID_HEART_PIECE, 0.6f },
+    { "Contenedor de corazon", GID_HEART_CONTAINER, 0.6f },
+    { "Rupia verde", GID_RUPEE_GREEN, 0.6f },
+    { "Rupia roja", GID_RUPEE_RED, 0.6f },
+    { "Rupia enorme", GID_RUPEE_HUGE, 0.6f },
+    { "Ficha de Skulltula dorada", GID_SKULL_TOKEN, 0.6f },
+};
+const int sObjectCount = (int)(sizeof(sObjects) / sizeof(sObjects[0]));
 
 // ---- Estado ----
 bool sEnabled = false;      // Interruptor general
@@ -35,32 +113,44 @@ bool sFreezeWorld = true;   // Congela actores y la hora
 bool sHideHud = true;       // Oculta la interfaz
 bool sHideTatl = true;      // Oculta a Tatl
 bool sPoseActive = false;   // Aplica la pose personalizada a Link
+float sWindowAlpha = 0.35f; // Opacidad del fondo de la ventana
 
 u16 sFrozenTime = 0;
 bool sTimeCaptured = false;
 
 // Pose
-PlayerAnimationFrame sBaseFrame;   // Frame base (de una animacion o capturado)
+PlayerAnimationFrame sBaseFrame; // Frame base (de una animacion o capturado)
 bool sHasBaseFrame = false;
 int sAnimIndex = -1;
 int sAnimFrame = 0;
 int sAnimFrameCount = 1;
-float sLimbOffsets[PLAYER_LIMB_MAX][3] = {};  // Grados por hueso (X, Y, Z)
-int sEyes = -1;    // -1 = la que traiga la animacion
-int sMouth = -1;   // -1 = la que traiga la animacion
+float sLimbOffsets[PLAYER_LIMB_MAX][3] = {}; // Grados por hueso (X, Y, Z)
+int sEyes = -1;                              // -1 = la que traiga la animacion
+int sMouth = -1;                             // -1 = la que traiga la animacion
 float sYawOffset = 0.0f;
 s16 sBaseYaw = 0;
 bool sHasBaseYaw = false;
 char sFilter[64] = "";
+int sCategory = 0; // 0 = todas, 1.. = sPhotoModeAnimCategories[i - 1]
+
+// Objeto
+bool sObjectMode = false;
+int sObjectIndex = 0;
+float sObjectSize = 1.0f;
+float sObjectHeight = 30.0f;
+float sObjectRot[3] = { 0.0f, 0.0f, 0.0f };
+bool sObjectSpin = false;
+float sObjectSpinAngle = 0.0f;
 
 const char* sLimbNames[PLAYER_LIMB_MAX] = {
-    "(posicion raiz)", "Raiz",          "Cintura",         "Raiz inferior",   "Muslo derecho",  "Pierna derecha",
-    "Pie derecho",     "Muslo izquierdo", "Pierna izquierda", "Pie izquierdo", "Raiz superior",  "Cabeza",
-    "Gorro",           "Cuello",        "Hombro izquierdo", "Antebrazo izquierdo", "Mano izquierda",
-    "Hombro derecho",  "Antebrazo derecho", "Mano derecha", "Funda",          "Torso",
+    "(posicion raiz)", "Raiz",          "Cintura",           "Raiz inferior",    "Muslo derecho",
+    "Pierna derecha",  "Pie derecho",   "Muslo izquierdo",   "Pierna izquierda", "Pie izquierdo",
+    "Raiz superior",   "Cabeza",        "Gorro",             "Cuello",           "Hombro izquierdo",
+    "Antebrazo izquierdo", "Mano izquierda", "Hombro derecho", "Antebrazo derecho", "Mano derecha",
+    "Funda",           "Torso",
 };
 
-const char* sEyeNames[] = { "De la animacion", "Abiertos", "Entrecerrados", "Cerrados", "Mirando derecha",
+const char* sEyeNames[] = { "De la animacion",   "Abiertos",       "Entrecerrados", "Cerrados", "Mirando derecha",
                             "Mirando izquierda", "Mirando arriba", "Mirando abajo", "Con dolor" };
 const char* sMouthNames[] = { "De la animacion", "Cerrada", "Entreabierta", "Abierta", "Sonrisa" };
 
@@ -81,8 +171,7 @@ bool LoadAnimFrame(int animIndex, int frame) {
         return false;
     }
 
-    PlayerAnimationHeader* anim =
-        (PlayerAnimationHeader*)ResourceMgr_LoadAnimByName(sPhotoModeAnims[animIndex].path);
+    PlayerAnimationHeader* anim = (PlayerAnimationHeader*)ResourceMgr_LoadAnimByName(sPhotoModeAnims[animIndex].path);
     if (anim == nullptr || anim->segmentVoid == nullptr) {
         return false;
     }
@@ -106,6 +195,21 @@ void CaptureCurrentPose() {
     memcpy(&sBaseFrame, player->skelAnime.jointTable, PHOTO_FRAME_SIZE);
     sHasBaseFrame = true;
     sAnimIndex = -1;
+}
+
+void EnablePose() {
+    if (sPoseActive) {
+        return;
+    }
+    sPoseActive = true;
+    if (!sHasBaseFrame) {
+        CaptureCurrentPose();
+    }
+    Player* player = GetPlayer();
+    if (player != nullptr) {
+        sBaseYaw = player->actor.shape.rot.y;
+        sHasBaseYaw = true;
+    }
 }
 
 void ResetLimbs() {
@@ -142,25 +246,55 @@ void ApplyPose(Player* player) {
     }
 }
 
+// Dibuja el objeto elegido en la posicion de Link.
+void DrawObject(Player* player) {
+    const PhotoModeObject& obj = sObjects[std::clamp(sObjectIndex, 0, sObjectCount - 1)];
+
+    if (sObjectSpin) {
+        sObjectSpinAngle += 1.5f;
+        if (sObjectSpinAngle >= 360.0f) {
+            sObjectSpinAngle -= 360.0f;
+        }
+    }
+
+    Vec3s rot;
+    rot.x = DegToBinang(sObjectRot[0]);
+    rot.y = (s16)(player->actor.shape.rot.y + DegToBinang(sObjectRot[1] + (sObjectSpin ? sObjectSpinAngle : 0.0f)));
+    rot.z = DegToBinang(sObjectRot[2]);
+
+    float scale = obj.baseScale * sObjectSize;
+
+    Matrix_Push();
+    Matrix_SetTranslateRotateYXZ(player->actor.world.pos.x, player->actor.world.pos.y + sObjectHeight,
+                                 player->actor.world.pos.z, &rot);
+    Matrix_Scale(scale, scale, scale, MTXMODE_APPLY);
+    if (obj.gid == PHOTO_OBJ_MAJORA) {
+        Gfx_DrawDListOpa(gPlayState, (Gfx*)gSkullKidMajorasMask1DL);
+    } else {
+        GetItem_Draw(gPlayState, obj.gid);
+    }
+    Matrix_Pop();
+}
+
 void SetDebugCam(bool on) {
     CVarSetInteger(DEBUG_CAM_CVAR, on ? 1 : 0);
     ShipInit::Init(DEBUG_CAM_CVAR);
 }
 
 void RegisterPhotoMode() {
-    // Congelar actores. Con una pose activa, Link siempre se congela para que no la sobrescriba.
+    // Congelar actores. Con una pose o un objeto activo, Link siempre se congela.
     COND_HOOK(ShouldActorUpdate, true, [](Actor* actor, bool* should) {
         if (!sEnabled) {
             return;
         }
         if (sFreezeWorld) {
             *should = false;
-        } else if (sPoseActive && actor->id == ACTOR_PLAYER) {
+        } else if ((sPoseActive || sObjectMode) && actor->id == ACTOR_PLAYER) {
             *should = false;
         }
     });
 
-    // Aplicar la pose justo antes de dibujar a Link y ocultar a Tatl.
+    // Aplicar la pose (o dibujar el objeto) justo antes de dibujar a Link, y ocultar a Tatl.
     COND_HOOK(ShouldActorDraw, true, [](Actor* actor, bool* should) {
         if (!sEnabled) {
             return;
@@ -169,8 +303,13 @@ void RegisterPhotoMode() {
         if (player == nullptr) {
             return;
         }
-        if (actor == &player->actor && sPoseActive) {
-            ApplyPose(player);
+        if (actor == &player->actor) {
+            if (sObjectMode) {
+                DrawObject(player);
+                *should = false;
+            } else if (sPoseActive) {
+                ApplyPose(player);
+            }
         } else if (sHideTatl && actor == player->tatlActor) {
             *should = false;
         }
@@ -198,15 +337,173 @@ void RegisterPhotoMode() {
 
 static RegisterShipInitFunc initFunc(RegisterPhotoMode, {});
 
-bool MatchesFilter(const char* name) {
+std::string ToLower(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+    return s;
+}
+
+bool MatchesFilter(const PhotoModeAnim& anim) {
+    if (sCategory > 0 && anim.category != sCategory - 1) {
+        return false;
+    }
     if (sFilter[0] == '\0') {
         return true;
     }
-    std::string haystack(name);
-    std::string needle(sFilter);
-    std::transform(haystack.begin(), haystack.end(), haystack.begin(), ::tolower);
-    std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
-    return haystack.find(needle) != std::string::npos;
+    std::string needle = ToLower(sFilter);
+    return ToLower(anim.label).find(needle) != std::string::npos ||
+           ToLower(anim.name).find(needle) != std::string::npos;
+}
+
+void DrawCameraSection() {
+    if (!ImGui::CollapsingHeader("Mundo y camara", ImGuiTreeNodeFlags_DefaultOpen)) {
+        return;
+    }
+    ImGui::Checkbox("Congelar el mundo y la hora", &sFreezeWorld);
+    ImGui::Checkbox("Ocultar HUD", &sHideHud);
+    ImGui::Checkbox("Ocultar a Tatl", &sHideTatl);
+
+    bool debugCam = CVarGetInteger(DEBUG_CAM_CVAR, 0) != 0;
+    if (ImGui::Checkbox("Camara libre", &debugCam)) {
+        SetDebugCam(debugCam);
+    }
+    if (debugCam) {
+        float speed = CVarGetFloat(DEBUG_CAM_SPEED_CVAR, 0.5f);
+        if (ImGui::SliderFloat("Velocidad de la camara", &speed, 0.05f, 2.0f, "%.2f")) {
+            CVarSetFloat(DEBUG_CAM_SPEED_CVAR, speed);
+        }
+        float vspeed = CVarGetFloat(DEBUG_CAM_VSPEED_CVAR, 0.25f);
+        if (ImGui::SliderFloat("Velocidad al subir / bajar", &vspeed, 0.02f, 1.0f, "%.2f")) {
+            CVarSetFloat(DEBUG_CAM_VSPEED_CVAR, vspeed);
+        }
+        ImGui::TextWrapped("Stick izquierdo: mover. Stick derecho o botones C: girar. Z / R: subir / bajar. "
+                           "Cruceta arriba / abajo: acercar / alejar. A, B o L: mas rapido.");
+    }
+}
+
+void DrawPoseSection() {
+    if (!ImGui::CollapsingHeader("Pose de Link", ImGuiTreeNodeFlags_DefaultOpen)) {
+        return;
+    }
+
+    bool pose = sPoseActive;
+    if (ImGui::Checkbox("Usar pose personalizada", &pose)) {
+        if (pose) {
+            EnablePose();
+        } else {
+            sPoseActive = false;
+            sHasBaseYaw = false;
+        }
+    }
+
+    if (ImGui::Button("Tomar la pose actual de Link")) {
+        CaptureCurrentPose();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Reiniciar ajustes")) {
+        ResetLimbs();
+    }
+
+    ImGui::Separator();
+    ImGui::Text("Animacion");
+
+    // Categoria
+    std::vector<const char*> categories;
+    categories.push_back("Todas");
+    for (size_t i = 0; i < PHOTO_MODE_ANIM_CATEGORY_COUNT; i++) {
+        categories.push_back(sPhotoModeAnimCategories[i]);
+    }
+    ImGui::Combo("Categoria", &sCategory, categories.data(), (int)categories.size());
+    ImGui::InputText("Buscar", sFilter, sizeof(sFilter));
+
+    if (ImGui::BeginListBox("##anims", ImVec2(-FLT_MIN, 200))) {
+        for (int i = 0; i < (int)PHOTO_MODE_ANIM_COUNT; i++) {
+            const PhotoModeAnim& anim = sPhotoModeAnims[i];
+            if (!MatchesFilter(anim)) {
+                continue;
+            }
+            ImGui::PushID(i);
+            bool selected = (i == sAnimIndex);
+            if (ImGui::Selectable(anim.label, selected)) {
+                sAnimIndex = i;
+                LoadAnimFrame(sAnimIndex, 0);
+                EnablePose(); // Elegir una animacion activa la pose automaticamente
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s\n(%s)", sPhotoModeAnimCategories[anim.category], anim.name);
+            }
+            if (selected) {
+                ImGui::SetItemDefaultFocus();
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndListBox();
+    }
+
+    if (sAnimIndex >= 0) {
+        ImGui::Text("%s  (%s)", sPhotoModeAnims[sAnimIndex].label, sPhotoModeAnims[sAnimIndex].name);
+        int frame = sAnimFrame;
+        if (ImGui::SliderInt("Frame", &frame, 0, std::max(0, sAnimFrameCount - 1))) {
+            LoadAnimFrame(sAnimIndex, frame);
+        }
+    } else {
+        ImGui::TextWrapped("Base: pose capturada del juego.");
+    }
+    ImGui::TextWrapped("Goron, Deku y Zora: esas animaciones se ven bien solo con esa forma puesta.");
+
+    ImGui::Separator();
+    ImGui::SliderFloat("Girar a Link", &sYawOffset, -180.0f, 180.0f, "%.0f grados");
+
+    int eyes = sEyes + 1;
+    if (ImGui::Combo("Ojos", &eyes, sEyeNames, IM_ARRAYSIZE(sEyeNames))) {
+        sEyes = eyes - 1;
+    }
+    int mouth = sMouth + 1;
+    if (ImGui::Combo("Boca", &mouth, sMouthNames, IM_ARRAYSIZE(sMouthNames))) {
+        sMouth = mouth - 1;
+    }
+
+    if (ImGui::TreeNode("Ajustar huesos")) {
+        for (int i = 1; i < PLAYER_LIMB_MAX; i++) {
+            ImGui::PushID(i);
+            ImGui::SliderFloat3(sLimbNames[i], sLimbOffsets[i], -180.0f, 180.0f, "%.0f");
+            ImGui::PopID();
+        }
+        ImGui::TreePop();
+    }
+}
+
+void DrawObjectSection() {
+    if (!ImGui::CollapsingHeader("Convertir a Link en un objeto")) {
+        return;
+    }
+    ImGui::Checkbox("Mostrar un objeto en lugar de Link", &sObjectMode);
+    ImGui::TextWrapped("El objeto aparece donde esta Link. Con la camara libre puedes rodearlo.");
+
+    if (ImGui::BeginListBox("##objects", ImVec2(-FLT_MIN, 160))) {
+        for (int i = 0; i < sObjectCount; i++) {
+            ImGui::PushID(i);
+            if (ImGui::Selectable(sObjects[i].name, i == sObjectIndex)) {
+                sObjectIndex = i;
+                sObjectMode = true;
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndListBox();
+    }
+
+    ImGui::SliderFloat("Tamano", &sObjectSize, 0.1f, 10.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+    ImGui::SliderFloat("Altura", &sObjectHeight, -50.0f, 200.0f, "%.0f");
+    ImGui::SliderFloat("Inclinar", &sObjectRot[0], -180.0f, 180.0f, "%.0f grados");
+    ImGui::SliderFloat("Girar", &sObjectRot[1], -180.0f, 180.0f, "%.0f grados");
+    ImGui::SliderFloat("Rotar", &sObjectRot[2], -180.0f, 180.0f, "%.0f grados");
+    ImGui::Checkbox("Girar solo", &sObjectSpin);
+    if (ImGui::Button("Reiniciar objeto")) {
+        sObjectSize = 1.0f;
+        sObjectHeight = 30.0f;
+        sObjectRot[0] = sObjectRot[1] = sObjectRot[2] = 0.0f;
+        sObjectSpin = false;
+        sObjectSpinAngle = 0.0f;
+    }
 }
 
 } // namespace
@@ -216,6 +513,12 @@ extern "C" int PhotoMode_ShouldHideHud(void) {
 }
 
 void PhotoModeWindow::InitElement() {
+}
+
+// Se reemplaza Draw solo para aplicar la transparencia del fondo antes de abrir la ventana.
+void PhotoModeWindow::Draw() {
+    ImGui::SetNextWindowBgAlpha(sWindowAlpha);
+    GuiWindow::Draw();
 }
 
 void PhotoModeWindow::DrawElement() {
@@ -228,114 +531,17 @@ void PhotoModeWindow::DrawElement() {
         if (!sEnabled) {
             sPoseActive = false;
             sHasBaseYaw = false;
+            sObjectMode = false;
         }
     }
+    ImGui::SliderFloat("Opacidad del menu", &sWindowAlpha, 0.0f, 1.0f, "%.2f");
     ImGui::TextWrapped("Consejo: con F1 ocultas el menu y puedes cerrar esta ventana; el Modo Foto sigue activo.");
 
     if (!sEnabled) {
         return;
     }
 
-    // ---- Mundo y camara ----
-    if (ImGui::CollapsingHeader("Mundo y camara", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Checkbox("Congelar el mundo y la hora", &sFreezeWorld);
-        ImGui::Checkbox("Ocultar HUD", &sHideHud);
-        ImGui::Checkbox("Ocultar a Tatl", &sHideTatl);
-
-        bool debugCam = CVarGetInteger(DEBUG_CAM_CVAR, 0) != 0;
-        if (ImGui::Checkbox("Camara libre", &debugCam)) {
-            SetDebugCam(debugCam);
-        }
-        if (debugCam) {
-            ImGui::TextWrapped("Stick izquierdo: mover. Stick derecho: girar. Z / R: subir / bajar. "
-                               "Cruceta arriba / abajo: acercar / alejar. A, B o L: mas rapido.");
-        }
-    }
-
-    // ---- Pose de Link ----
-    if (ImGui::CollapsingHeader("Pose de Link", ImGuiTreeNodeFlags_DefaultOpen)) {
-        Player* player = GetPlayer();
-
-        if (ImGui::Checkbox("Usar pose personalizada", &sPoseActive)) {
-            if (sPoseActive) {
-                if (!sHasBaseFrame) {
-                    CaptureCurrentPose();
-                }
-                if (player != nullptr) {
-                    sBaseYaw = player->actor.shape.rot.y;
-                    sHasBaseYaw = true;
-                }
-            } else {
-                sHasBaseYaw = false;
-            }
-        }
-
-        if (ImGui::Button("Tomar la pose actual de Link")) {
-            CaptureCurrentPose();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Reiniciar ajustes")) {
-            ResetLimbs();
-        }
-
-        ImGui::Separator();
-        ImGui::Text("Animacion");
-        ImGui::InputText("Buscar", sFilter, sizeof(sFilter));
-
-        if (ImGui::BeginListBox("##anims", ImVec2(-FLT_MIN, 180))) {
-            for (int i = 0; i < (int)PHOTO_MODE_ANIM_COUNT; i++) {
-                if (!MatchesFilter(sPhotoModeAnims[i].name)) {
-                    continue;
-                }
-                bool selected = (i == sAnimIndex);
-                if (ImGui::Selectable(sPhotoModeAnims[i].name, selected)) {
-                    sAnimIndex = i;
-                    LoadAnimFrame(sAnimIndex, 0);
-                    // Elegir una animacion activa la pose automaticamente
-                    if (!sPoseActive) {
-                        sPoseActive = true;
-                        if (player != nullptr) {
-                            sBaseYaw = player->actor.shape.rot.y;
-                            sHasBaseYaw = true;
-                        }
-                    }
-                }
-                if (selected) {
-                    ImGui::SetItemDefaultFocus();
-                }
-            }
-            ImGui::EndListBox();
-        }
-
-        if (sAnimIndex >= 0) {
-            ImGui::Text("Animacion: %s", sPhotoModeAnims[sAnimIndex].name);
-            int frame = sAnimFrame;
-            if (ImGui::SliderInt("Frame", &frame, 0, std::max(0, sAnimFrameCount - 1))) {
-                LoadAnimFrame(sAnimIndex, frame);
-            }
-        } else {
-            ImGui::TextWrapped("Base: pose capturada del juego.");
-        }
-
-        ImGui::Separator();
-        ImGui::SliderFloat("Girar a Link", &sYawOffset, -180.0f, 180.0f, "%.0f grados");
-
-        int eyes = sEyes + 1;
-        if (ImGui::Combo("Ojos", &eyes, sEyeNames, IM_ARRAYSIZE(sEyeNames))) {
-            sEyes = eyes - 1;
-        }
-        int mouth = sMouth + 1;
-        if (ImGui::Combo("Boca", &mouth, sMouthNames, IM_ARRAYSIZE(sMouthNames))) {
-            sMouth = mouth - 1;
-        }
-
-        if (ImGui::TreeNode("Ajustar huesos")) {
-            for (int i = 1; i < PLAYER_LIMB_MAX; i++) {
-                ImGui::PushID(i);
-                ImGui::SliderFloat3(sLimbNames[i], sLimbOffsets[i], -180.0f, 180.0f, "%.0f");
-                ImGui::PopID();
-            }
-            ImGui::TreePop();
-        }
-    }
+    DrawCameraSection();
+    DrawPoseSection();
+    DrawObjectSection();
 }

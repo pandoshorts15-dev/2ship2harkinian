@@ -156,6 +156,17 @@ void Camera_DebugCam(Camera* camera) {
     f32 pitchDiff = sCamPlayState->state.input[controllerPort].cur.right_stick_y * 10.0f *
                     (CVarGetFloat("gEnhancements.Camera.RightStick.CameraSensitivity.Y", 1.0f));
 
+    // 2S2H [Photo Mode] Si el stick derecho esta asignado a los botones C (configuracion por defecto de muchos
+    // mandos), right_stick_x/y quedan en 0. En ese caso se gira la camara con los botones C.
+    if (yawDiff == 0.0f && pitchDiff == 0.0f) {
+        auto cButtons = sCamPlayState->state.input[controllerPort].cur.button;
+        const f32 cStep = 35.0f * 10.0f;
+        yawDiff = (CHECK_BTN_ANY(cButtons, BTN_CLEFT) - CHECK_BTN_ANY(cButtons, BTN_CRIGHT)) * cStep *
+                  CVarGetFloat("gEnhancements.Camera.RightStick.CameraSensitivity.X", 1.0f);
+        pitchDiff = (CHECK_BTN_ANY(cButtons, BTN_CUP) - CHECK_BTN_ANY(cButtons, BTN_CDOWN)) * cStep *
+                    CVarGetFloat("gEnhancements.Camera.RightStick.CameraSensitivity.Y", 1.0f);
+    }
+
     yawDiff *= GameInteractor_InvertControl(GI_INVERT_CAMERA_RIGHT_STICK_X);
     pitchDiff *= -GameInteractor_InvertControl(GI_INVERT_CAMERA_RIGHT_STICK_Y);
 
@@ -185,7 +196,7 @@ void Camera_DebugCam(Camera* camera) {
     posDiff.x = sCamPlayState->state.input[controllerPort].cur.stick_x * camSpeed;
     posDiff.y = (CHECK_BTN_ANY(sCamPlayState->state.input[controllerPort].cur.button, BTN_Z) -
                  CHECK_BTN_ANY(sCamPlayState->state.input[controllerPort].cur.button, BTN_R)) *
-                120.0f * camSpeed;
+                120.0f * camSpeed * CVarGetFloat("gEnhancements.Camera.DebugCam.VerticalSpeed", 0.25f);
     posDiff.z = -sCamPlayState->state.input[controllerPort].cur.stick_y * camSpeed;
 
     // Adjust movement to camera's current direction
