@@ -27,6 +27,8 @@ extern "C" {
 #include "gfx.h"
 #include "objects/object_stk/object_stk.h"
 AnimationHeaderCommon* ResourceMgr_LoadAnimByName(const char* path);
+extern Gfx* gPlayerLeftHandOpenDLs[];
+extern Gfx* gPlayerLeftHandClosedDLs[];
 }
 
 #include "PhotoModeScenes.h"
@@ -151,6 +153,23 @@ float sMoveSpeed = 0.5f;
 Vec3f sSavedPos;
 s16 sSavedYaw = 0;
 bool sHasSavedPos = false;
+
+// Equipo visible
+bool sHideSword = false;
+bool sHideSheath = false;
+bool sHideShield = false;
+bool sOpenHand = true; // Mano izquierda abierta (true) o cerrada (false) al quitar la espada
+Gfx* sEmptyDLs[2 * PLAYER_FORM_MAX] = {};
+
+// Copia de lo que se cambia solo durante el dibujo de Link (se restaura justo despues).
+struct EquipBackup {
+    bool active = false;
+    Player* player = nullptr;
+    u16 equipment = 0;
+    s8 shield = 0;
+    Gfx** leftHandDLists = nullptr;
+    Gfx** sheathDLists = nullptr;
+} sEquipBackup;
 
 // Teletransporte
 char sSceneFilter[64] = "";
@@ -291,6 +310,49 @@ void DrawObject(Player* player) {
     Matrix_Pop();
 }
 
+// Quita espada / funda / escudo solo mientras se dibuja a Link. La partida no cambia: la espada vuelve a
+// "equiparse" en cuanto termina el dibujo, antes de que el juego actualice o guarde nada.
+void RestoreEquip() {
+    if (!sEquipBackup.active) {
+        return;
+    }
+    gSaveContext.save.saveInfo.equips.equipment = sEquipBackup.equipment;
+    if (sEquipBackup.player != nullptr) {
+        sEquipBackup.player->currentShield = sEquipBackup.shield;
+        sEquipBackup.player->leftHandDLists = sEquipBackup.leftHandDLists;
+        sEquipBackup.player->sheathDLists = sEquipBackup.sheathDLists;
+    }
+    sEquipBackup.active = false;
+}
+
+void ApplyEquipHide(Player* player) {
+    RestoreEquip();
+    if (!sHideSword && !sHideShield) {
+        return;
+    }
+    sEquipBackup.active = true;
+    sEquipBackup.player = player;
+    sEquipBackup.equipment = gSaveContext.save.saveInfo.equips.equipment;
+    sEquipBackup.shield = player->currentShield;
+    sEquipBackup.leftHandDLists = player->leftHandDLists;
+    sEquipBackup.sheathDLists = player->sheathDLists;
+
+    if (sHideSword) {
+        SET_EQUIP_VALUE(EQUIP_TYPE_SWORD, EQUIP_VALUE_SWORD_NONE);
+        if (player->leftHandType == PLAYER_MODELTYPE_LH_ONE_HAND_SWORD ||
+            player->leftHandType == PLAYER_MODELTYPE_LH_TWO_HAND_SWORD) {
+            Gfx** hands = sOpenHand ? gPlayerLeftHandOpenDLs : gPlayerLeftHandClosedDLs;
+            player->leftHandDLists = &hands[player->transformation * 2];
+        }
+        if (sHideSheath) {
+            player->sheathDLists = sEmptyDLs;
+        }
+    }
+    if (sHideShield) {
+        player->currentShield = PLAYER_SHIELD_NONE;
+    }
+}
+
 void SetDebugCam(bool on) {
     CVarSetInteger(DEBUG_CAM_CVAR, on ? 1 : 0);
     ShipInit::Init(DEBUG_CAM_CVAR);
@@ -413,16 +475,27 @@ void RegisterPhotoMode() {
             if (sObjectMode) {
                 DrawObject(player);
                 *should = false;
-            } else if (sPoseActive) {
-                ApplyPose(player);
+            } else {
+                if (sPoseActive) {
+                    ApplyPose(player);
+                }
+                ApplyEquipHide(player);
             }
         } else if (sHideTatl && actor == player->tatlActor) {
             *should = false;
         }
     });
 
+    // Justo despues de dibujar a Link se le devuelve el equipo.
+    COND_HOOK(OnActorDraw, true, [](Actor* actor) {
+        if (sEquipBackup.active && actor == &sEquipBackup.player->actor) {
+            RestoreEquip();
+        }
+    });
+
     // Detener la hora mientras el mundo esta congelado.
     COND_HOOK(OnGameStateUpdate, true, []() {
+        RestoreEquip(); // seguridad: nunca dejar el equipo cambiado durante la logica del juego
         if (sEnabled && sFreezeWorld) {
             if (!sTimeCaptured) {
                 sFrozenTime = gSaveContext.save.time;
@@ -443,6 +516,11 @@ void RegisterPhotoMode() {
         sHasBaseYaw = false;
         sMoveLink = false;
         sHasSavedPos = false;
+        // El Link anterior ya no existe: solo se devuelve la espada a la partida.
+        if (sEquipBackup.active) {
+            gSaveContext.save.saveInfo.equips.equipment = sEquipBackup.equipment;
+            sEquipBackup.active = false;
+        }
     });
 }
 
@@ -640,6 +718,24 @@ void DrawMoveSection() {
     ImGui::EndDisabled();
 }
 
+void DrawEquipSection() {
+    if (!ImGui::CollapsingHeader("Equipo visible", ImGuiTreeNodeFlags_DefaultOpen)) {
+        return;
+    }
+    ImGui::Checkbox("Ocultar espada", &sHideSword);
+    if (sHideSword) {
+        ImGui::Indent();
+        ImGui::Checkbox("Ocultar tambien la funda", &sHideSheath);
+        if (sHideSheath) {
+            ImGui::TextWrapped("Ojo: el escudo en la espalda va colgado de la funda, asi que tambien desaparece.");
+        }
+        ImGui::Checkbox("Mano abierta (si no, puno cerrado)", &sOpenHand);
+        ImGui::Unindent();
+    }
+    ImGui::Checkbox("Ocultar escudo", &sHideShield);
+    ImGui::TextWrapped("Solo cambia lo que se ve: tu partida conserva la espada y el escudo.");
+}
+
 bool SceneMatchesFilter(const PhotoModeScene& scene) {
     if (sRegion > 0 && strcmp(scene.region, sPhotoModeRegions[sRegion - 1]) != 0) {
         return false;
@@ -765,6 +861,7 @@ void PhotoModeWindow::DrawElement() {
             sObjectMode = false;
             sMoveLink = false;
             sHasSavedPos = false;
+            RestoreEquip();
         }
     }
     ImGui::SliderFloat("Opacidad del menu", &sWindowAlpha, 0.0f, 1.0f, "%.2f");
@@ -781,6 +878,7 @@ void PhotoModeWindow::DrawElement() {
 
     DrawCameraSection();
     DrawMoveSection();
+    DrawEquipSection();
     DrawPoseSection();
     DrawObjectSection();
     DrawTeleportSection();
