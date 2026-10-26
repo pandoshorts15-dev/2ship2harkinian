@@ -25,6 +25,7 @@
 
 #include <string.h>
 #include "2s2h/Enhancements/FrameInterpolation/FrameInterpolation.h"
+#include "2s2h/Enhancements/PhotoMode/PhotoMode.h"
 #include "2s2h/GameInteractor/GameInteractor.h"
 #include "2s2h/BenPort.h"
 #include "2s2h/ShipUtils.h"
@@ -2996,7 +2997,7 @@ void Actor_Draw(PlayState* play, Actor* actor) {
         }
     }
 
-    if (actor->shape.shadowDraw != NULL) {
+    if (actor->shape.shadowDraw != NULL && !PhotoMode_ShouldHideShadow(actor)) {
         actor->shape.shadowDraw(actor, light, play);
     }
     actor->isDrawn = true;
@@ -3443,8 +3444,10 @@ void Actor_DrawAll(PlayState* play, ActorContext* actorCtx) {
         }
     }
 
-    Effect_DrawAll(play->state.gfxCtx);
-    EffectSs_DrawAll(play);
+    if (!PhotoMode_ShouldHideParticles()) {
+        Effect_DrawAll(play->state.gfxCtx);
+        EffectSs_DrawAll(play);
+    }
     EffFootmark_Draw(play);
 
     ref2 = POLY_XLU_DISP;

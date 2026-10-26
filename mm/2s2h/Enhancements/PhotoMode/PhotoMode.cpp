@@ -11,12 +11,19 @@
 #include "2s2h/BenGui/UIWidgets.hpp"
 #include "2s2h/GameInteractor/GameInteractor.h"
 #include "2s2h/ShipInit.hpp"
+#include "2s2h/ShipUtils.h"
 
 #include <cstring>
 #include <string>
 #include <vector>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <set>
+#include <nlohmann/json.hpp>
+#include <ship/Context.h>
+#include <ship/config/Config.h>
+#include <imgui_internal.h>
 
 extern "C" {
 #include "z64.h"
@@ -170,6 +177,70 @@ struct EquipBackup {
     Gfx** leftHandDLists = nullptr;
     Gfx** sheathDLists = nullptr;
 } sEquipBackup;
+
+// Luna
+bool sMoonAdjust = false;
+bool sMoonHide = false;
+float sMoonOffset[3] = { 0.0f, 0.0f, 0.0f }; // derecha, arriba, mas lejos (segun la camara al activar)
+float sMoonScale = 1.0f;
+float sMoonRot[3] = { 0.0f, 0.0f, 0.0f }; // giro, inclinacion, ladeo
+s16 sMoonBasisYaw = 0;
+
+struct MoonBackup {
+    Actor* actor = nullptr;
+    Vec3f pos;
+    Vec3f scale;
+    Vec3s rot;
+} sMoonBackup;
+
+// Fondo de color solido y limpieza de la escena
+bool sChroma = false;
+float sChromaColor[3] = { 0.0f, 1.0f, 0.0f };
+bool sChromaOnlyLink = true;
+bool sHideNpcs = false;
+bool sHideEnemies = false;
+bool sHideParticles = false;
+
+// Objeto en la mano (0 = izquierda, 1 = derecha)
+struct HandObject {
+    bool on = false;
+    int index = 0;
+    float size = 1.0f;
+    float offset[3] = { 0.0f, 0.0f, 0.0f };
+    float rot[3] = { 0.0f, 0.0f, 0.0f };
+};
+HandObject sHand[2];
+MtxF sHandMtx[2];
+bool sHandMtxValid[2] = { false, false };
+
+// Tamano de Link
+float sLinkScale = 1.0f;
+struct ScaleBackup {
+    Actor* actor = nullptr;
+    Vec3f scale;
+} sScaleBackup;
+
+// Lente y guias de encuadre
+bool sFovOverride = false;
+float sFov = 60.0f;
+bool sGuides = false;
+bool sGuideThirds = true;
+bool sGuideCenter = true;
+bool sGuideBadge = true;
+
+// Hora y dia
+int sDayChoice = 0; // 0 = todavia no se ha leido el dia de la partida
+
+// Favoritas y escenas guardadas (se guardan en el archivo de configuracion de 2Ship)
+std::set<std::string> sFavorites;
+bool sOnlyFavorites = false;
+nlohmann::json sSavedScenes = nlohmann::json::array();
+bool sConfigLoaded = false;
+char sSceneName[64] = "";
+int sSavedSceneIndex = -1;
+int sPendingLoad = -1;
+int sPendingDelay = 0;
+std::string sSceneMessage;
 
 // Teletransporte
 char sSceneFilter[64] = "";
@@ -353,6 +424,174 @@ void ApplyEquipHide(Player* player) {
     }
 }
 
+// La luna es el actor En_Fall. Sus tipos 3, 4, 8 y 11 son efectos (bolas de fuego, escombros, lagrima, anillo).
+bool IsMoonActor(Actor* actor) {
+    if (actor->id != ACTOR_EN_FALL) {
+        return false;
+    }
+    int type = (actor->params & 0xF80) >> 7;
+    return type != 3 && type != 4 && type != 8 && type != 11;
+}
+
+Actor* FindMoon() {
+    if (gPlayState == nullptr) {
+        return nullptr;
+    }
+    for (Actor* a = gPlayState->actorCtx.actorLists[ACTORCAT_ITEMACTION].first; a != nullptr; a = a->next) {
+        if (IsMoonActor(a)) {
+            return a;
+        }
+    }
+    return nullptr;
+}
+
+void CaptureMoonBasis() {
+    Camera* cam = (gPlayState != nullptr) ? GET_ACTIVE_CAM(gPlayState) : nullptr;
+    if (cam != nullptr) {
+        sMoonBasisYaw = Math_Vec3f_Yaw(&cam->eye, &cam->at);
+    }
+}
+
+// Mueve / escala / gira la luna solo durante su dibujo. Actor_Draw ya calculo la matriz, asi que se rehace.
+void ApplyMoonAdjust(Actor* moon) {
+    sMoonBackup.actor = moon;
+    sMoonBackup.pos = moon->world.pos;
+    sMoonBackup.scale = moon->scale;
+    sMoonBackup.rot = moon->shape.rot;
+
+    float fx = Math_SinS(sMoonBasisYaw);
+    float fz = Math_CosS(sMoonBasisYaw);
+    moon->world.pos.x += -fz * sMoonOffset[0] + fx * sMoonOffset[2];
+    moon->world.pos.z += fx * sMoonOffset[0] + fz * sMoonOffset[2];
+    moon->world.pos.y += sMoonOffset[1];
+    moon->scale.x *= sMoonScale;
+    moon->scale.y *= sMoonScale;
+    moon->scale.z *= sMoonScale;
+    moon->shape.rot.y += DegToBinang(sMoonRot[0]);
+    moon->shape.rot.x += DegToBinang(sMoonRot[1]);
+    moon->shape.rot.z += DegToBinang(sMoonRot[2]);
+
+    Matrix_SetTranslateRotateYXZ(moon->world.pos.x, moon->world.pos.y + (moon->shape.yOffset * moon->scale.y),
+                                 moon->world.pos.z, &moon->shape.rot);
+    Matrix_Scale(moon->scale.x, moon->scale.y, moon->scale.z, MTXMODE_APPLY);
+}
+
+void RestoreMoon() {
+    if (sMoonBackup.actor == nullptr) {
+        return;
+    }
+    sMoonBackup.actor->world.pos = sMoonBackup.pos;
+    sMoonBackup.actor->scale = sMoonBackup.scale;
+    sMoonBackup.actor->shape.rot = sMoonBackup.rot;
+    sMoonBackup.actor = nullptr;
+}
+
+// ---- Ocultar actores ----
+bool IsHiddenByPhotoMode(Actor* actor) {
+    if (!sEnabled || gPlayState == nullptr) {
+        return false;
+    }
+    Player* player = GET_PLAYER(gPlayState);
+    if (player != nullptr && actor == &player->actor) {
+        return false;
+    }
+    bool onlyLink = sChroma && sChromaOnlyLink;
+    if (IsMoonActor(actor)) {
+        return sMoonHide || onlyLink;
+    }
+    if (player != nullptr && actor == player->tatlActor) {
+        return sHideTatl || onlyLink;
+    }
+    if (onlyLink) {
+        return true;
+    }
+    if (sHideNpcs && actor->category == ACTORCAT_NPC) {
+        return true;
+    }
+    if (sHideEnemies && (actor->category == ACTORCAT_ENEMY || actor->category == ACTORCAT_BOSS)) {
+        return true;
+    }
+    return false;
+}
+
+// ---- Tamano de Link (solo al dibujar; se rehace la matriz que ya calculo Actor_Draw) ----
+void ApplyLinkScale(Player* player) {
+    if (std::fabs(sLinkScale - 1.0f) < 0.001f) {
+        return;
+    }
+    Actor* a = &player->actor;
+    sScaleBackup.actor = a;
+    sScaleBackup.scale = a->scale;
+    a->scale.x *= sLinkScale;
+    a->scale.y *= sLinkScale;
+    a->scale.z *= sLinkScale;
+    Matrix_SetTranslateRotateYXZ(a->world.pos.x, a->world.pos.y + (a->shape.yOffset * a->scale.y), a->world.pos.z,
+                                 &a->shape.rot);
+    Matrix_Scale(a->scale.x, a->scale.y, a->scale.z, MTXMODE_APPLY);
+}
+
+void RestoreLinkScale() {
+    if (sScaleBackup.actor == nullptr) {
+        return;
+    }
+    sScaleBackup.actor->scale = sScaleBackup.scale;
+    sScaleBackup.actor = nullptr;
+}
+
+// ---- Objeto en la mano ----
+// Durante el dibujo de Link solo se guarda la matriz de cada mano. El objeto se dibuja despues de Link,
+// para no cambiarle el estado grafico al resto del cuerpo (colores de la tunica, etc.).
+// Escala: en el juego un objeto sostenido se dibuja a 0.2 en el mundo; dentro de la mano (Link mide 0.01) es x20.
+void DrawHandObject(int h) {
+    const HandObject& ho = sHand[h];
+    const PhotoModeObject& obj = sObjects[std::clamp(ho.index, 0, sObjectCount - 1)];
+    float scale = obj.baseScale * (20.0f / 0.6f) * ho.size;
+
+    Matrix_Push();
+    Matrix_Put(&sHandMtx[h]);
+    Matrix_Translate(ho.offset[0], ho.offset[1], ho.offset[2], MTXMODE_APPLY);
+    Matrix_RotateZYX(DegToBinang(ho.rot[0]), DegToBinang(ho.rot[1]), DegToBinang(ho.rot[2]), MTXMODE_APPLY);
+    Matrix_Scale(scale, scale, scale, MTXMODE_APPLY);
+    if (obj.gid == PHOTO_OBJ_MAJORA) {
+        Gfx_DrawDListOpa(gPlayState, (Gfx*)gSkullKidMajorasMask1DL);
+    } else {
+        GetItem_Draw(gPlayState, obj.gid);
+    }
+    Matrix_Pop();
+}
+
+// ---- Configuracion guardada (favoritas y escenas) ----
+void LoadPhotoConfig() {
+    if (sConfigLoaded) {
+        return;
+    }
+    sConfigLoaded = true;
+    auto all = Ship::Context::GetRawInstance()->GetConfig()->GetNestedJson();
+    if (!all.contains("PhotoMode") || !all["PhotoMode"].is_object()) {
+        return;
+    }
+    auto pm = all["PhotoMode"];
+    if (pm.contains("favorites") && pm["favorites"].is_array()) {
+        for (auto& f : pm["favorites"]) {
+            if (f.is_string()) {
+                sFavorites.insert(f.get<std::string>());
+            }
+        }
+    }
+    if (pm.contains("scenes") && pm["scenes"].is_array()) {
+        sSavedScenes = pm["scenes"];
+    }
+}
+
+void SavePhotoConfig() {
+    nlohmann::json pm;
+    pm["favorites"] = std::vector<std::string>(sFavorites.begin(), sFavorites.end());
+    pm["scenes"] = sSavedScenes;
+    auto config = Ship::Context::GetRawInstance()->GetConfig();
+    config->SetBlock("PhotoMode", pm);
+    config->Save();
+}
+
 void SetDebugCam(bool on) {
     CVarSetInteger(DEBUG_CAM_CVAR, on ? 1 : 0);
     ShipInit::Init(DEBUG_CAM_CVAR);
@@ -449,6 +688,278 @@ void TeleportTo(s32 entrance) {
     gSaveContext.nextTransitionType = TRANS_TYPE_FADE_BLACK_FAST;
 }
 
+// ---- Escenas guardadas ----
+nlohmann::json Vec3ToJson(const Vec3f& v) {
+    return nlohmann::json::array({ v.x, v.y, v.z });
+}
+
+Vec3f JsonToVec3(const nlohmann::json& j) {
+    Vec3f v = { 0.0f, 0.0f, 0.0f };
+    if (j.is_array() && j.size() == 3) {
+        v.x = j[0].get<float>();
+        v.y = j[1].get<float>();
+        v.z = j[2].get<float>();
+    }
+    return v;
+}
+
+template <size_t N> nlohmann::json ArrToJson(const float (&a)[N]) {
+    return std::vector<float>(a, a + N);
+}
+
+template <size_t N> void JsonToArr(const nlohmann::json& j, float (&a)[N]) {
+    if (j.is_array() && j.size() == N) {
+        for (size_t i = 0; i < N; i++) {
+            a[i] = j[i].get<float>();
+        }
+    }
+}
+
+int FindObjectByName(const std::string& name) {
+    for (int i = 0; i < sObjectCount; i++) {
+        if (name == sObjects[i].name) {
+            return i;
+        }
+    }
+    return 0;
+}
+
+int FindAnimByName(const std::string& name) {
+    for (int i = 0; i < (int)PHOTO_MODE_ANIM_COUNT; i++) {
+        if (name == sPhotoModeAnims[i].name) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+nlohmann::json BuildScene(const std::string& name) {
+    nlohmann::json j;
+    Player* player = GetPlayer();
+    j["name"] = name;
+    j["sceneId"] = gPlayState->sceneId;
+    j["sceneName"] = Ship_GetSceneName(gPlayState->sceneId);
+    j["entrance"] = gSaveContext.save.entrance;
+    j["day"] = (int)CURRENT_DAY;
+    j["time"] = (int)gSaveContext.save.time;
+
+    if (player != nullptr) {
+        j["pos"] = Vec3ToJson(player->actor.world.pos);
+        j["rotY"] = player->actor.shape.rot.y;
+    }
+
+    // Pose
+    j["pose"] = sPoseActive;
+    j["animName"] = (sAnimIndex >= 0) ? sPhotoModeAnims[sAnimIndex].name : "";
+    j["frame"] = sAnimFrame;
+    if (sHasBaseFrame) {
+        const s16* raw = (const s16*)&sBaseFrame;
+        j["baseFrame"] = std::vector<int>(raw, raw + PHOTO_FRAME_SIZE / sizeof(s16));
+    }
+    std::vector<float> limbs;
+    for (int i = 0; i < PLAYER_LIMB_MAX; i++) {
+        limbs.insert(limbs.end(), sLimbOffsets[i], sLimbOffsets[i] + 3);
+    }
+    j["limbs"] = limbs;
+    j["eyes"] = sEyes;
+    j["mouth"] = sMouth;
+    j["yawOffset"] = sYawOffset;
+    j["baseYaw"] = sBaseYaw;
+
+    // Equipo, tamano y objetos
+    j["hideSword"] = sHideSword;
+    j["hideSheath"] = sHideSheath;
+    j["hideShield"] = sHideShield;
+    j["openHand"] = sOpenHand;
+    j["linkScale"] = sLinkScale;
+    j["objectMode"] = sObjectMode;
+    j["object"] = sObjects[sObjectIndex].name;
+    j["objectSize"] = sObjectSize;
+    j["objectHeight"] = sObjectHeight;
+    j["objectRot"] = ArrToJson(sObjectRot);
+    j["objectSpin"] = sObjectSpin;
+    nlohmann::json hands = nlohmann::json::array();
+    for (int h = 0; h < 2; h++) {
+        hands.push_back({ { "on", sHand[h].on },
+                          { "object", sObjects[sHand[h].index].name },
+                          { "size", sHand[h].size },
+                          { "offset", ArrToJson(sHand[h].offset) },
+                          { "rot", ArrToJson(sHand[h].rot) } });
+    }
+    j["hands"] = hands;
+
+    // Mundo, fondo, luna y lente
+    j["freeze"] = sFreezeWorld;
+    j["hideHud"] = sHideHud;
+    j["hideTatl"] = sHideTatl;
+    j["hideNpcs"] = sHideNpcs;
+    j["hideEnemies"] = sHideEnemies;
+    j["hideParticles"] = sHideParticles;
+    j["chroma"] = sChroma;
+    j["chromaColor"] = ArrToJson(sChromaColor);
+    j["chromaOnlyLink"] = sChromaOnlyLink;
+    j["moonHide"] = sMoonHide;
+    j["moonAdjust"] = sMoonAdjust;
+    j["moonOffset"] = ArrToJson(sMoonOffset);
+    j["moonScale"] = sMoonScale;
+    j["moonRot"] = ArrToJson(sMoonRot);
+    j["moonBasisYaw"] = sMoonBasisYaw;
+    j["fovOverride"] = sFovOverride;
+    j["fov"] = sFov;
+
+    // Camara
+    bool debugCam = CVarGetInteger(DEBUG_CAM_CVAR, 0) != 0;
+    j["debugCam"] = debugCam;
+    Camera* cam = GET_ACTIVE_CAM(gPlayState);
+    if (cam != nullptr) {
+        j["camEye"] = Vec3ToJson(cam->eye);
+        j["camAt"] = Vec3ToJson(cam->at);
+        j["camRoll"] = cam->roll;
+    }
+    return j;
+}
+
+template <typename T> void Get(const nlohmann::json& j, const char* key, T& out) {
+    if (j.contains(key) && !j[key].is_null()) {
+        out = j[key].get<T>();
+    }
+}
+
+void ApplyScene(const nlohmann::json& j) {
+    Player* player = GetPlayer();
+    if (player == nullptr) {
+        return;
+    }
+
+    // Hora
+    if (j.contains("time")) {
+        u16 t = (u16)j["time"].get<int>();
+        gSaveContext.save.time = t;
+        sFrozenTime = t;
+        sTimeCaptured = sFreezeWorld;
+    }
+
+    // Opciones generales
+    Get(j, "freeze", sFreezeWorld);
+    Get(j, "hideHud", sHideHud);
+    Get(j, "hideTatl", sHideTatl);
+    Get(j, "hideNpcs", sHideNpcs);
+    Get(j, "hideEnemies", sHideEnemies);
+    Get(j, "hideParticles", sHideParticles);
+    Get(j, "chroma", sChroma);
+    JsonToArr(j.value("chromaColor", nlohmann::json()), sChromaColor);
+    Get(j, "chromaOnlyLink", sChromaOnlyLink);
+    Get(j, "moonHide", sMoonHide);
+    Get(j, "moonAdjust", sMoonAdjust);
+    JsonToArr(j.value("moonOffset", nlohmann::json()), sMoonOffset);
+    Get(j, "moonScale", sMoonScale);
+    JsonToArr(j.value("moonRot", nlohmann::json()), sMoonRot);
+    Get(j, "moonBasisYaw", sMoonBasisYaw);
+    Get(j, "fovOverride", sFovOverride);
+    Get(j, "fov", sFov);
+
+    // Equipo, tamano y objetos
+    Get(j, "hideSword", sHideSword);
+    Get(j, "hideSheath", sHideSheath);
+    Get(j, "hideShield", sHideShield);
+    Get(j, "openHand", sOpenHand);
+    Get(j, "linkScale", sLinkScale);
+    Get(j, "objectMode", sObjectMode);
+    sObjectIndex = FindObjectByName(j.value("object", std::string()));
+    Get(j, "objectSize", sObjectSize);
+    Get(j, "objectHeight", sObjectHeight);
+    JsonToArr(j.value("objectRot", nlohmann::json()), sObjectRot);
+    Get(j, "objectSpin", sObjectSpin);
+    if (j.contains("hands") && j["hands"].is_array()) {
+        for (int h = 0; h < 2 && h < (int)j["hands"].size(); h++) {
+            const auto& hj = j["hands"][h];
+            Get(hj, "on", sHand[h].on);
+            sHand[h].index = FindObjectByName(hj.value("object", std::string()));
+            Get(hj, "size", sHand[h].size);
+            JsonToArr(hj.value("offset", nlohmann::json()), sHand[h].offset);
+            JsonToArr(hj.value("rot", nlohmann::json()), sHand[h].rot);
+        }
+    }
+
+    // Posicion de Link
+    if (j.contains("pos")) {
+        player->actor.world.pos = JsonToVec3(j["pos"]);
+        player->actor.prevPos = player->actor.world.pos;
+        player->actor.home.pos = player->actor.world.pos;
+    }
+    if (j.contains("rotY")) {
+        player->actor.shape.rot.y = j["rotY"].get<s16>();
+        player->actor.world.rot.y = player->actor.shape.rot.y;
+    }
+
+    // Pose
+    std::string animName = j.value("animName", std::string());
+    int animIndex = animName.empty() ? -1 : FindAnimByName(animName);
+    if (animIndex >= 0) {
+        sAnimIndex = animIndex;
+        LoadAnimFrame(animIndex, j.value("frame", 0));
+    } else if (j.contains("baseFrame") && j["baseFrame"].is_array() &&
+               j["baseFrame"].size() == PHOTO_FRAME_SIZE / sizeof(s16)) {
+        s16* raw = (s16*)&sBaseFrame;
+        for (size_t i = 0; i < j["baseFrame"].size(); i++) {
+            raw[i] = (s16)j["baseFrame"][i].get<int>();
+        }
+        sHasBaseFrame = true;
+        sAnimIndex = -1;
+    }
+    if (j.contains("limbs") && j["limbs"].is_array() && j["limbs"].size() == PLAYER_LIMB_MAX * 3) {
+        for (int i = 0; i < PLAYER_LIMB_MAX * 3; i++) {
+            sLimbOffsets[i / 3][i % 3] = j["limbs"][i].get<float>();
+        }
+    }
+    Get(j, "eyes", sEyes);
+    Get(j, "mouth", sMouth);
+    Get(j, "yawOffset", sYawOffset);
+    bool pose = false;
+    Get(j, "pose", pose);
+    sPoseActive = pose && sHasBaseFrame;
+    if (sPoseActive) {
+        sBaseYaw = j.value("baseYaw", (int)player->actor.shape.rot.y);
+        sHasBaseYaw = true;
+    }
+
+    // Camara
+    bool debugCam = false;
+    Get(j, "debugCam", debugCam);
+    if (debugCam) {
+        if (CVarGetInteger(DEBUG_CAM_CVAR, 0) == 0) {
+            SetDebugCam(true);
+        }
+        Camera* cam = GET_ACTIVE_CAM(gPlayState);
+        if (cam != nullptr && j.contains("camEye") && j.contains("camAt")) {
+            cam->eye = JsonToVec3(j["camEye"]);
+            cam->eyeNext = cam->eye;
+            cam->at = JsonToVec3(j["camAt"]);
+            cam->roll = j.value("camRoll", 0);
+        }
+    }
+    sSceneMessage = "Escena cargada: " + j.value("name", std::string());
+}
+
+void LoadSavedScene(int index) {
+    if (index < 0 || index >= (int)sSavedScenes.size() || gPlayState == nullptr) {
+        return;
+    }
+    const auto& j = sSavedScenes[index];
+    int sceneId = j.value("sceneId", -1);
+    int day = j.value("day", (int)CURRENT_DAY);
+    if (sceneId != gPlayState->sceneId || day != (int)CURRENT_DAY) {
+        // Primero hay que ir a la escena (y al dia) donde se guardo; se termina de cargar al llegar.
+        gSaveContext.save.day = day;
+        TeleportTo(j.value("entrance", (int)gSaveContext.save.entrance));
+        sPendingLoad = index;
+        sPendingDelay = 20;
+        sSceneMessage = "Viajando a la escena guardada...";
+        return;
+    }
+    ApplyScene(j);
+}
+
 void RegisterPhotoMode() {
     // Congelar actores. Con una pose o un objeto activo, Link siempre se congela.
     COND_HOOK(ShouldActorUpdate, true, [](Actor* actor, bool* should) {
@@ -467,22 +978,42 @@ void RegisterPhotoMode() {
         if (!sEnabled) {
             return;
         }
-        Player* player = GetPlayer();
-        if (player == nullptr) {
+        if (IsHiddenByPhotoMode(actor)) {
+            *should = false;
             return;
         }
-        if (actor == &player->actor) {
-            if (sObjectMode) {
-                DrawObject(player);
-                *should = false;
-            } else {
-                if (sPoseActive) {
-                    ApplyPose(player);
-                }
-                ApplyEquipHide(player);
+        if (IsMoonActor(actor)) {
+            if (sMoonAdjust) {
+                ApplyMoonAdjust(actor);
             }
-        } else if (sHideTatl && actor == player->tatlActor) {
+            return;
+        }
+        Player* player = GetPlayer();
+        if (player == nullptr || actor != &player->actor) {
+            return;
+        }
+        sHandMtxValid[0] = sHandMtxValid[1] = false;
+        if (sObjectMode) {
+            DrawObject(player);
             *should = false;
+        } else {
+            if (sPoseActive) {
+                ApplyPose(player);
+            }
+            ApplyEquipHide(player);
+            ApplyLinkScale(player);
+        }
+    });
+
+    // Guardar la matriz de cada mano mientras se dibuja el cuerpo de Link.
+    COND_HOOK(OnPlayerPostLimbDraw, true, [](Player* player, s32 limbIndex) {
+        if (!sEnabled) {
+            return;
+        }
+        int h = (limbIndex == PLAYER_LIMB_LEFT_HAND) ? 0 : (limbIndex == PLAYER_LIMB_RIGHT_HAND) ? 1 : -1;
+        if (h >= 0 && sHand[h].on) {
+            Matrix_Get(&sHandMtx[h]);
+            sHandMtxValid[h] = true;
         }
     });
 
@@ -491,11 +1022,40 @@ void RegisterPhotoMode() {
         if (sEquipBackup.active && actor == &sEquipBackup.player->actor) {
             RestoreEquip();
         }
+        if (actor == sScaleBackup.actor) {
+            RestoreLinkScale();
+        }
+        if (sEnabled && gPlayState != nullptr && actor == &GET_PLAYER(gPlayState)->actor) {
+            for (int h = 0; h < 2; h++) {
+                if (sHand[h].on && sHandMtxValid[h]) {
+                    DrawHandObject(h);
+                }
+            }
+        }
+        if (actor == sMoonBackup.actor) {
+            RestoreMoon();
+        }
     });
 
     // Detener la hora mientras el mundo esta congelado.
     COND_HOOK(OnGameStateUpdate, true, []() {
         RestoreEquip(); // seguridad: nunca dejar el equipo cambiado durante la logica del juego
+        RestoreMoon();
+        RestoreLinkScale();
+        // Terminar de cargar una escena guardada cuando ya se llego a su escenario.
+        if (sPendingLoad >= 0 && gPlayState != nullptr && gPlayState->transitionTrigger == TRANS_TRIGGER_OFF &&
+            gPlayState->transitionMode == TRANS_MODE_OFF && GetPlayer() != nullptr) {
+            if (--sPendingDelay <= 0) {
+                int index = sPendingLoad;
+                sPendingLoad = -1;
+                if (index < (int)sSavedScenes.size() &&
+                    sSavedScenes[index].value("sceneId", -1) == gPlayState->sceneId) {
+                    ApplyScene(sSavedScenes[index]);
+                } else {
+                    sSceneMessage = "No se pudo llegar a la escena guardada.";
+                }
+            }
+        }
         if (sEnabled && sFreezeWorld) {
             if (!sTimeCaptured) {
                 sFrozenTime = gSaveContext.save.time;
@@ -516,6 +1076,9 @@ void RegisterPhotoMode() {
         sHasBaseYaw = false;
         sMoveLink = false;
         sHasSavedPos = false;
+        sMoonBackup.actor = nullptr;
+        sScaleBackup.actor = nullptr;
+        sHandMtxValid[0] = sHandMtxValid[1] = false;
         // El Link anterior ya no existe: solo se devuelve la espada a la partida.
         if (sEquipBackup.active) {
             gSaveContext.save.saveInfo.equips.equipment = sEquipBackup.equipment;
@@ -535,6 +1098,9 @@ bool MatchesFilter(const PhotoModeAnim& anim) {
     if (sCategory > 0 && anim.category != sCategory - 1) {
         return false;
     }
+    if (sOnlyFavorites && sFavorites.count(anim.name) == 0) {
+        return false;
+    }
     if (sFilter[0] == '\0') {
         return true;
     }
@@ -550,6 +1116,27 @@ void DrawCameraSection() {
     ImGui::Checkbox("Congelar el mundo y la hora", &sFreezeWorld);
     ImGui::Checkbox("Ocultar HUD", &sHideHud);
     ImGui::Checkbox("Ocultar a Tatl", &sHideTatl);
+
+    // Hora del dia
+    int minutes = (int)((u32)gSaveContext.save.time * 1440 / 0x10000);
+    char timeLabel[16];
+    snprintf(timeLabel, sizeof(timeLabel), "%02d:%02d", minutes / 60, minutes % 60);
+    if (ImGui::SliderInt("Hora", &minutes, 0, 1439, timeLabel)) {
+        u16 t = (u16)((u32)minutes * 0x10000 / 1440);
+        gSaveContext.save.time = t;
+        sFrozenTime = t;
+    }
+    if (sDayChoice == 0) {
+        sDayChoice = std::clamp((int)CURRENT_DAY, 1, 3);
+    }
+    ImGui::SliderInt("Dia", &sDayChoice, 1, 3);
+    ImGui::SameLine();
+    if (ImGui::Button("Aplicar dia")) {
+        gSaveContext.save.day = sDayChoice;
+        TeleportTo(gSaveContext.save.entrance);
+    }
+    ImGui::TextWrapped("Dia actual: %d. Cambiar el dia recarga la escena. No guardes la partida despues.",
+                       (int)CURRENT_DAY);
 
     bool debugCam = CVarGetInteger(DEBUG_CAM_CVAR, 0) != 0;
     if (ImGui::Checkbox("Camara libre", &debugCam)) {
@@ -603,6 +1190,7 @@ void DrawPoseSection() {
     }
     ImGui::Combo("Categoria", &sCategory, categories.data(), (int)categories.size());
     ImGui::InputText("Buscar", sFilter, sizeof(sFilter));
+    ImGui::Checkbox("Solo favoritas", &sOnlyFavorites);
 
     if (ImGui::BeginListBox("##anims", ImVec2(-FLT_MIN, 200))) {
         for (int i = 0; i < (int)PHOTO_MODE_ANIM_COUNT; i++) {
@@ -612,7 +1200,8 @@ void DrawPoseSection() {
             }
             ImGui::PushID(i);
             bool selected = (i == sAnimIndex);
-            if (ImGui::Selectable(anim.label, selected)) {
+            std::string label = (sFavorites.count(anim.name) ? "* " : "") + std::string(anim.label);
+            if (ImGui::Selectable(label.c_str(), selected)) {
                 sAnimIndex = i;
                 LoadAnimFrame(sAnimIndex, 0);
                 EnablePose(); // Elegir una animacion activa la pose automaticamente
@@ -630,6 +1219,15 @@ void DrawPoseSection() {
 
     if (sAnimIndex >= 0) {
         ImGui::Text("%s  (%s)", sPhotoModeAnims[sAnimIndex].label, sPhotoModeAnims[sAnimIndex].name);
+        bool fav = sFavorites.count(sPhotoModeAnims[sAnimIndex].name) != 0;
+        if (ImGui::Button(fav ? "Quitar de favoritas" : "Agregar a favoritas")) {
+            if (fav) {
+                sFavorites.erase(sPhotoModeAnims[sAnimIndex].name);
+            } else {
+                sFavorites.insert(sPhotoModeAnims[sAnimIndex].name);
+            }
+            SavePhotoConfig();
+        }
         int frame = sAnimFrame;
         if (ImGui::SliderInt("Frame", &frame, 0, std::max(0, sAnimFrameCount - 1))) {
             LoadAnimFrame(sAnimIndex, frame);
@@ -716,6 +1314,219 @@ void DrawMoveSection() {
         RestoreLinkPosition();
     }
     ImGui::EndDisabled();
+
+    ImGui::SliderFloat("Tamano de Link", &sLinkScale, 0.1f, 20.0f, "x%.2f", ImGuiSliderFlags_Logarithmic);
+    ImGui::SameLine();
+    if (ImGui::Button("x1")) {
+        sLinkScale = 1.0f;
+    }
+}
+
+void DrawFramingSection() {
+    if (!ImGui::CollapsingHeader("Encuadre y lente")) {
+        return;
+    }
+    ImGui::Checkbox("Mostrar guias de miniatura", &sGuides);
+    if (sGuides) {
+        ImGui::Indent();
+        ImGui::Checkbox("Tercios", &sGuideThirds);
+        ImGui::Checkbox("Linea del centro (para 0% / 100%)", &sGuideCenter);
+        ImGui::Checkbox("Zona de la duracion de YouTube (aprox.)", &sGuideBadge);
+        ImGui::Unindent();
+        ImGui::TextWrapped("Las guias solo se ven con esta ventana abierta: cierrala (o pulsa F1) antes de capturar.");
+    }
+
+    if (ImGui::Checkbox("Cambiar el lente (zoom)", &sFovOverride)) {
+        if (sFovOverride && gPlayState != nullptr) {
+            sFov = gPlayState->view.fovy;
+        }
+    }
+    if (sFovOverride) {
+        ImGui::SliderFloat("Campo de vision", &sFov, 5.0f, 120.0f, "%.0f grados");
+        ImGui::TextWrapped("Menos grados = mas zoom y fondo mas \"pegado\" al personaje. El juego usa unos 60.");
+    }
+}
+
+void DrawCleanSection() {
+    if (!ImGui::CollapsingHeader("Fondo y limpieza")) {
+        return;
+    }
+    ImGui::Checkbox("Fondo de color solido (pantalla verde)", &sChroma);
+    if (sChroma) {
+        ImGui::Indent();
+        ImGui::ColorEdit3("Color del fondo", sChromaColor, ImGuiColorEditFlags_NoInputs);
+        ImGui::SameLine();
+        if (ImGui::Button("Verde")) {
+            sChromaColor[0] = 0.0f;
+            sChromaColor[1] = 1.0f;
+            sChromaColor[2] = 0.0f;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Magenta")) {
+            sChromaColor[0] = 1.0f;
+            sChromaColor[1] = 0.0f;
+            sChromaColor[2] = 1.0f;
+        }
+        ImGui::Checkbox("Solo Link (ocultar todos los demas personajes)", &sChromaOnlyLink);
+        ImGui::Unindent();
+        ImGui::TextWrapped("Usa magenta si el personaje tiene verde (Link con tunica, mascara Deku).");
+    }
+    ImGui::Checkbox("Ocultar personajes (NPC)", &sHideNpcs);
+    ImGui::Checkbox("Ocultar enemigos y jefes", &sHideEnemies);
+    ImGui::Checkbox("Ocultar particulas", &sHideParticles);
+}
+
+void DrawHandSection() {
+    if (!ImGui::CollapsingHeader("Objeto en la mano")) {
+        return;
+    }
+    const char* handNames[2] = { "Mano izquierda", "Mano derecha" };
+    for (int h = 0; h < 2; h++) {
+        ImGui::PushID(h);
+        HandObject& ho = sHand[h];
+        ImGui::Checkbox(handNames[h], &ho.on);
+        if (ho.on) {
+            ImGui::Indent();
+            if (ImGui::BeginCombo("Objeto", sObjects[ho.index].name)) {
+                for (int i = 0; i < sObjectCount; i++) {
+                    ImGui::PushID(i);
+                    if (ImGui::Selectable(sObjects[i].name, i == ho.index)) {
+                        ho.index = i;
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SliderFloat("Tamano", &ho.size, 0.1f, 10.0f, "x%.2f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat3("Mover (X Y Z)", ho.offset, -1500.0f, 1500.0f, "%.0f");
+            ImGui::SliderFloat3("Girar (X Y Z)", ho.rot, -180.0f, 180.0f, "%.0f");
+            if (ImGui::Button("Reiniciar")) {
+                HandObject fresh;
+                fresh.on = true;
+                fresh.index = ho.index;
+                ho = fresh;
+            }
+            ImGui::Unindent();
+        }
+        ImGui::PopID();
+    }
+    ImGui::TextWrapped("Se mueve y gira junto con la mano. Para dos espadas: oculta la espada de Link en \"Equipo "
+                       "visible\" o deja la suya y pon otra en la mano libre. Ctrl + clic en un slider para "
+                       "escribir el valor exacto.");
+}
+
+void DrawScenesSection() {
+    if (!ImGui::CollapsingHeader("Escenas guardadas")) {
+        return;
+    }
+    ImGui::InputText("Nombre", sSceneName, sizeof(sSceneName));
+    ImGui::SameLine();
+    if (ImGui::Button("Guardar") && GetPlayer() != nullptr) {
+        std::string name = sSceneName[0] != '\0' ? sSceneName : ("Escena " + std::to_string(sSavedScenes.size() + 1));
+        sSavedScenes.push_back(BuildScene(name));
+        SavePhotoConfig();
+        sSavedSceneIndex = (int)sSavedScenes.size() - 1;
+        sSceneName[0] = '\0';
+        sSceneMessage = "Guardada: " + name;
+    }
+
+    if (ImGui::BeginListBox("##saved", ImVec2(-FLT_MIN, 5 * ImGui::GetTextLineHeightWithSpacing()))) {
+        for (int i = 0; i < (int)sSavedScenes.size(); i++) {
+            ImGui::PushID(i);
+            std::string label = sSavedScenes[i].value("name", std::string("?")) + "  -  " +
+                                sSavedScenes[i].value("sceneName", std::string(""));
+            if (ImGui::Selectable(label.c_str(), i == sSavedSceneIndex, ImGuiSelectableFlags_AllowDoubleClick)) {
+                sSavedSceneIndex = i;
+                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                    LoadSavedScene(i);
+                }
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndListBox();
+    }
+
+    bool valid = sSavedSceneIndex >= 0 && sSavedSceneIndex < (int)sSavedScenes.size();
+    ImGui::BeginDisabled(!valid);
+    if (ImGui::Button("Cargar")) {
+        LoadSavedScene(sSavedSceneIndex);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Sobrescribir") && GetPlayer() != nullptr) {
+        std::string name = sSavedScenes[sSavedSceneIndex].value("name", std::string("Escena"));
+        sSavedScenes[sSavedSceneIndex] = BuildScene(name);
+        SavePhotoConfig();
+        sSceneMessage = "Sobrescrita: " + name;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Borrar")) {
+        sSavedScenes.erase(sSavedScenes.begin() + sSavedSceneIndex);
+        SavePhotoConfig();
+        sSavedSceneIndex = -1;
+        sSceneMessage = "Escena borrada.";
+    }
+    ImGui::EndDisabled();
+    if (!sSceneMessage.empty()) {
+        ImGui::TextWrapped("%s", sSceneMessage.c_str());
+    }
+    ImGui::TextWrapped("Guarda pose, equipo, objetos, posicion de Link, camara, hora, luna y fondo. Si la escena es "
+                       "de otro lugar o dia, primero te lleva alli. Doble clic tambien carga.");
+}
+
+// Guias encima de la imagen del juego (solo mientras la ventana del Modo Foto esta abierta).
+void DrawGuides() {
+    ImGuiWindow* game = ImGui::FindWindowByName("Main Game");
+    if (game == nullptr) {
+        return;
+    }
+    ImVec2 pos = game->Pos;
+    ImVec2 size = game->Size;
+    if (size.x < 10.0f || size.y < 10.0f) {
+        return;
+    }
+    // Zona 16:9 centrada (lo que ocuparia la miniatura).
+    float w = size.x, h = size.y;
+    if (w / h > 16.0f / 9.0f) {
+        w = h * 16.0f / 9.0f;
+    } else {
+        h = w * 9.0f / 16.0f;
+    }
+    ImVec2 a = ImVec2(pos.x + (size.x - w) * 0.5f, pos.y + (size.y - h) * 0.5f);
+    ImVec2 b = ImVec2(a.x + w, a.y + h);
+    ImDrawList* dl = ImGui::GetForegroundDrawList(game->Viewport);
+
+    const ImU32 shade = IM_COL32(0, 0, 0, 140);
+    if (a.x > pos.x + 1.0f) {
+        dl->AddRectFilled(pos, ImVec2(a.x, pos.y + size.y), shade);
+        dl->AddRectFilled(ImVec2(b.x, pos.y), ImVec2(pos.x + size.x, pos.y + size.y), shade);
+    }
+    if (a.y > pos.y + 1.0f) {
+        dl->AddRectFilled(pos, ImVec2(pos.x + size.x, a.y), shade);
+        dl->AddRectFilled(ImVec2(pos.x, b.y), ImVec2(pos.x + size.x, pos.y + size.y), shade);
+    }
+    dl->AddRect(a, b, IM_COL32(255, 255, 255, 160));
+
+    if (sGuideThirds) {
+        const ImU32 c = IM_COL32(255, 255, 255, 110);
+        for (int i = 1; i <= 2; i++) {
+            float x = a.x + w * i / 3.0f;
+            float y = a.y + h * i / 3.0f;
+            dl->AddLine(ImVec2(x, a.y), ImVec2(x, b.y), c);
+            dl->AddLine(ImVec2(a.x, y), ImVec2(b.x, y), c);
+        }
+    }
+    if (sGuideCenter) {
+        float x = a.x + w * 0.5f;
+        dl->AddLine(ImVec2(x, a.y), ImVec2(x, b.y), IM_COL32(255, 220, 0, 200), 2.0f);
+    }
+    if (sGuideBadge) {
+        // Aproximado: la etiqueta de duracion ocupa la esquina inferior derecha.
+        ImVec2 ba = ImVec2(b.x - w * 0.14f, b.y - h * 0.12f);
+        ImVec2 bb = ImVec2(b.x - w * 0.01f, b.y - h * 0.02f);
+        dl->AddRectFilled(ba, bb, IM_COL32(255, 0, 0, 70));
+        dl->AddRect(ba, bb, IM_COL32(255, 60, 60, 200));
+        dl->AddText(ImVec2(ba.x + 4.0f, ba.y + 2.0f), IM_COL32(255, 255, 255, 220), "duracion");
+    }
 }
 
 void DrawEquipSection() {
@@ -734,6 +1545,47 @@ void DrawEquipSection() {
     }
     ImGui::Checkbox("Ocultar escudo", &sHideShield);
     ImGui::TextWrapped("Solo cambia lo que se ve: tu partida conserva la espada y el escudo.");
+}
+
+void DrawMoonSection() {
+    if (!ImGui::CollapsingHeader("Luna")) {
+        return;
+    }
+    if (FindMoon() == nullptr) {
+        ImGui::TextWrapped("No hay luna en esta escena (o todavia no se ve a esta hora).");
+        return;
+    }
+    ImGui::Checkbox("Ocultar la luna", &sMoonHide);
+    if (sMoonHide) {
+        return;
+    }
+    if (ImGui::Checkbox("Ajustar la luna", &sMoonAdjust)) {
+        if (sMoonAdjust) {
+            CaptureMoonBasis();
+        }
+    }
+    if (!sMoonAdjust) {
+        return;
+    }
+    ImGui::TextWrapped("Las direcciones se toman de la camara al activar esta opcion. Si mueves mucho la camara, "
+                       "pulsa \"Recalcular direcciones\".");
+    ImGui::SliderFloat("Izquierda / derecha", &sMoonOffset[0], -15000.0f, 15000.0f, "%.0f");
+    ImGui::SliderFloat("Abajo / arriba", &sMoonOffset[1], -15000.0f, 15000.0f, "%.0f");
+    ImGui::SliderFloat("Mas cerca / mas lejos", &sMoonOffset[2], -15000.0f, 15000.0f, "%.0f");
+    ImGui::SliderFloat("Tamano", &sMoonScale, 0.1f, 5.0f, "x%.2f");
+    ImGui::SliderFloat("Girar", &sMoonRot[0], -180.0f, 180.0f, "%.0f");
+    ImGui::SliderFloat("Inclinar", &sMoonRot[1], -90.0f, 90.0f, "%.0f");
+    ImGui::SliderFloat("Ladear", &sMoonRot[2], -180.0f, 180.0f, "%.0f");
+    if (ImGui::Button("Recalcular direcciones")) {
+        CaptureMoonBasis();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Restablecer luna")) {
+        memset(sMoonOffset, 0, sizeof(sMoonOffset));
+        memset(sMoonRot, 0, sizeof(sMoonRot));
+        sMoonScale = 1.0f;
+    }
+    ImGui::TextWrapped("Tip: Ctrl + clic en un slider para escribir el valor exacto.");
 }
 
 bool SceneMatchesFilter(const PhotoModeScene& scene) {
@@ -805,6 +1657,31 @@ extern "C" int PhotoMode_IsMovingLink(void) {
     return (sEnabled && sMoveLink) ? 1 : 0;
 }
 
+extern "C" int PhotoMode_ShouldHideWorld(void) {
+    return (sEnabled && sChroma) ? 1 : 0;
+}
+
+extern "C" void PhotoMode_GetBackgroundColor(unsigned char* rgb) {
+    for (int i = 0; i < 3; i++) {
+        rgb[i] = (unsigned char)std::clamp((int)(sChromaColor[i] * 255.0f + 0.5f), 0, 255);
+    }
+}
+
+extern "C" int PhotoMode_ShouldHideShadow(Actor* actor) {
+    if (!sEnabled) {
+        return 0;
+    }
+    return (sChroma || IsHiddenByPhotoMode(actor)) ? 1 : 0;
+}
+
+extern "C" int PhotoMode_ShouldHideParticles(void) {
+    return (sEnabled && (sHideParticles || (sChroma && sChromaOnlyLink))) ? 1 : 0;
+}
+
+extern "C" float PhotoMode_AdjustFov(float fov) {
+    return (sEnabled && sFovOverride) ? sFov : fov;
+}
+
 void PhotoModeWindow::InitElement() {
 }
 
@@ -845,6 +1722,10 @@ void PhotoModeWindow::Draw() {
     ImGui::End();
     ImGui::PopStyleColor(5);
 
+    if (sEnabled && sGuides && mIsVisible) {
+        DrawGuides();
+    }
+
     SyncVisibilityConsoleVariable();
 }
 
@@ -876,10 +1757,16 @@ void PhotoModeWindow::DrawElement() {
         return;
     }
 
+    LoadPhotoConfig();
+    DrawScenesSection();
     DrawCameraSection();
+    DrawFramingSection();
+    DrawCleanSection();
     DrawMoveSection();
     DrawEquipSection();
+    DrawHandSection();
     DrawPoseSection();
     DrawObjectSection();
+    DrawMoonSection();
     DrawTeleportSection();
 }

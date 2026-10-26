@@ -1216,7 +1216,12 @@ void Play_DrawMain(PlayState* this) {
     }
 
     if ((R_PAUSE_BG_PRERENDER_STATE <= PAUSE_BG_PRERENDER_SETUP) && (gTransitionTileState <= TRANS_TILE_SETUP)) {
-        if (this->skyboxCtx.shouldDraw || (this->roomCtx.curRoom.roomShape->base.type == ROOM_SHAPE_TYPE_IMAGE)) {
+        if (PhotoMode_ShouldHideWorld()) {
+            // 2S2H [Photo Mode] Fondo de color solido
+            unsigned char bg[3];
+            PhotoMode_GetBackgroundColor(bg);
+            func_8012CF0C(gfxCtx, true, true, bg[0], bg[1], bg[2]);
+        } else if (this->skyboxCtx.shouldDraw || (this->roomCtx.curRoom.roomShape->base.type == ROOM_SHAPE_TYPE_IMAGE)) {
             func_8012CF0C(gfxCtx, false, true, 0, 0, 0);
         } else {
             func_8012CF0C(gfxCtx, true, true, this->lightCtx.fogColor[0], this->lightCtx.fogColor[1],
@@ -1255,7 +1260,7 @@ void Play_DrawMain(PlayState* this) {
             zFar = 12800.0f;
         }
 
-        View_SetPerspective(&this->view, this->view.fovy, this->view.zNear, zFar);
+        View_SetPerspective(&this->view, PhotoMode_AdjustFov(this->view.fovy), this->view.zNear, zFar);
 
         View_Apply(&this->view, 0xF);
 
@@ -1369,7 +1374,7 @@ void Play_DrawMain(PlayState* this) {
             }
 
             if (!this->soaringCsOrSoTCsPlaying) {
-                if (1) {
+                if (!PhotoMode_ShouldHideWorld()) {
                     if (((u32)this->skyboxId != SKYBOX_NONE) && !this->envCtx.skyboxDisabled) {
                         if ((this->skyboxId == SKYBOX_NORMAL_SKY) || (this->skyboxId == SKYBOX_3)) {
                             Environment_UpdateSkybox(this->skyboxId, &this->envCtx, &this->skyboxCtx);
@@ -1393,7 +1398,7 @@ void Play_DrawMain(PlayState* this) {
                 Lights_BindAll(lights, this->lightCtx.listHead, NULL, this);
                 Lights_Draw(lights, gfxCtx);
 
-                if (1) {
+                if (!PhotoMode_ShouldHideWorld()) {
                     //! FAKE:
                     u32 roomDrawFlags = ((1) ? 1 : 0) | (((void)0, 1) ? 2 : 0);
 
@@ -1414,7 +1419,7 @@ void Play_DrawMain(PlayState* this) {
                     }
                 }
 
-                if (this->skyboxCtx.shouldDraw) {
+                if (this->skyboxCtx.shouldDraw && !PhotoMode_ShouldHideWorld()) {
                     Vec3f quakeOffset;
 
                     if (1) {
@@ -1424,7 +1429,7 @@ void Play_DrawMain(PlayState* this) {
                     }
                 }
 
-                if (this->envCtx.precipitation[PRECIP_RAIN_CUR] != 0) {
+                if (this->envCtx.precipitation[PRECIP_RAIN_CUR] != 0 && !PhotoMode_ShouldHideWorld()) {
                     Environment_DrawRain(this, &this->view, gfxCtx);
                 }
             }
@@ -1437,7 +1442,7 @@ void Play_DrawMain(PlayState* this) {
                 Actor_DrawAll(this, &this->actorCtx);
             }
 
-            if (1) {
+            if (!PhotoMode_ShouldHideWorld()) {
                 if (!this->envCtx.sunDisabled) {
                     temp.x = this->view.eye.x + this->envCtx.sunPos.x;
                     temp.y = this->view.eye.y + this->envCtx.sunPos.y;
@@ -1467,7 +1472,7 @@ void Play_DrawMain(PlayState* this) {
             }
 
             if (1) {
-                if (this->envCtx.sandstormState != SANDSTORM_OFF) {
+                if (this->envCtx.sandstormState != SANDSTORM_OFF && !PhotoMode_ShouldHideWorld()) {
                     Environment_DrawSandstorm(this, this->envCtx.sandstormState);
                 }
             }
@@ -1566,7 +1571,7 @@ SkipPostWorldDraw:
         }
     }
 
-    if (!sp25B) {
+    if (!sp25B && !PhotoMode_ShouldHideWorld()) {
         Environment_DrawSkyboxStars(this);
     }
 
